@@ -279,7 +279,7 @@
         tokens[account_id] = await fetch("https://beta.rpc.mainnet.near.org/", {
           method: "POST",
           headers: {
-            "Content-Type": "application/javascript"
+            "Content-Type": "application/json"
           },
           body: JSON.stringify({
             id: "dontcare",
