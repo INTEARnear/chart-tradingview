@@ -134,7 +134,7 @@
                 periodParams.countBack
               } ${periodParams.to * 1000}`
             );
-            const url = `https://events.intear.tech/api/ohlc?token=${
+            const url = `https://events-ve.intear.tech/v3/price_token/ohlc?token=${
               symbolInfo.full_name
             }&resolution=${resolution}&count_back=${periodParams.countBack}&to=${
               periodParams.to * 1000
@@ -148,6 +148,7 @@
               bar.close = parseFloat(bar.close) * 10 ** (decimals - USDT_DECIMALS);
               bar.high = parseFloat(bar.high) * 10 ** (decimals - USDT_DECIMALS);
               bar.low = parseFloat(bar.low) * 10 ** (decimals - USDT_DECIMALS);
+	      bar.time = bar.timestamp_millis
               return bar;
             });
             if (!latestBars[symbolInfo.full_name + "/" + resolution]) {
@@ -167,14 +168,15 @@
             const decimals = (await getMetadata(symbolInfo.full_name)).decimals;
             const USDT_DECIMALS = 6;
             const ws = new WebSocket(
-              "wss://ws-events.intear.tech/events/price_token"
+              "wss://ws-events-v3.intear.tech/events/price_token"
             );
             subscribers[listenerGuid] = { ws };
             ws.onopen = () => {
-              ws.send(JSON.stringify({ token: symbolInfo.full_name }));
+              ws.send(JSON.stringify({"And":[{"path":"token","operator":{"Equals":symbolInfo.full_name}}]}));
             };
             ws.onmessage = (e) => {
-              const data = JSON.parse(e.data);
+              const events = JSON.parse(e.data);
+	      for (let data of events) {
               if (data.token !== symbolInfo.full_name) {
                 return;
               }
@@ -206,7 +208,7 @@
                   throw new Error(`Unexpected resolution ${resolution}`);
               }
               const nextBarTime =
-                latestBars[symbolInfo.full_name + "/" + resolution].time + barTime;
+                latestBars[symbolInfo.full_name + "/" + resolution].timestamp_millis + barTime;
               const tradePrice =
                 parseFloat(data.price_usd) * 10 ** (decimals - USDT_DECIMALS);
               if (time > nextBarTime) {
@@ -231,6 +233,7 @@
                   ...latestBars[symbolInfo.full_name + "/" + resolution]
                 };
               }
+	      }
               onTick(latestBars[symbolInfo.full_name + "/" + resolution]);
             };
           },
