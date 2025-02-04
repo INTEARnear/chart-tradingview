@@ -17,7 +17,7 @@
           window.matchMedia("(prefers-color-scheme: dark)").matches ||
           params.get("theme") != "light";
         const theme = isDark ? "dark" : "light";
-        const symbol = params.get("token") ?? "intel.tkn.near";
+        const symbol = params.get("token") ?? (isTestnet ? "wrap.testnet" : "wrap.near");
         const subscriptions = {};
         const timezone =
           {
