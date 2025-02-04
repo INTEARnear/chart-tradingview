@@ -7,6 +7,11 @@
 		<script type="text/javascript" src="https://dynamic-moxie-09a484.netlify.app/charting_library.standalone.js"></script>
     <script>
       function initOnReady() {
+        const isTestnet = window.location.hostname.includes('testnet');
+        const pricesUrl = isTestnet ? 'https://prices-testnet.intear.tech' : 'https://prices.intear.tech';
+        const eventsUrl = isTestnet ? 'https://events-v3-testnet.intear.tech' : 'https://events-v3.intear.tech';
+        const wsEventsUrl = isTestnet ? 'wss://ws-events-v3-testnet.intear.tech' : 'wss://ws-events-v3.intear.tech';
+
         const params = new URLSearchParams(window.location.search);
         const isDark =
           window.matchMedia("(prefers-color-scheme: dark)").matches ||
@@ -69,7 +74,7 @@
           ) => {
             console.log(`Searching ${userInput}`);
             const results = await fetch(
-              `https://prices.intear.tech/token-search?q=${encodeURIComponent(
+              `${pricesUrl}/token-search?q=${encodeURIComponent(
                 userInput
               )}&n=20`
             ).then((res) => res.json());
@@ -97,7 +102,7 @@
             console.log(`Loading ${symbolName}`);
             const metadata = await getMetadata(symbolName);
             const price = await fetch(
-              `https://prices.intear.tech/price?token_id=${symbolName}`
+              `${pricesUrl}/price?token_id=${symbolName}`
             ).then((data) => data.json());
             const digits = Math.ceil(Math.max(0, -Math.log10(price))) + 3;
             onSymbolResolvedCallback({
@@ -134,7 +139,7 @@
                 periodParams.countBack
               } ${periodParams.to * 1000}`
             );
-            const url = `https://events-v3.intear.tech/v3/price_token/ohlc?token=${
+            const url = `${eventsUrl}/v3/price_token/ohlc?token=${
               symbolInfo.full_name
             }&resolution=${resolution}&count_back=${periodParams.countBack}&to=${
               periodParams.to * 1000
@@ -169,7 +174,7 @@
             const decimals = (await getMetadata(symbolInfo.full_name)).decimals;
             const USDT_DECIMALS = 6;
             const ws = new WebSocket(
-              "wss://ws-events-v3.intear.tech/events/price_token"
+              `${wsEventsUrl}/events/price_token`
             );
             subscribers[listenerGuid] = { ws };
             ws.onopen = () => {
