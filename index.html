@@ -104,11 +104,15 @@
             const price = await fetch(
               `${pricesUrl}/price?token_id=${symbolName}`
             ).then((data) => data.json());
-            const digits = Math.ceil(Math.max(0, -Math.log10(price))) + 3;
+            const isMCap = localStorage.getItem('chartMode') === 'mcap';
+            // Adjust digits based on mode
+            const baseDigits = Math.ceil(Math.max(0, -Math.log10(price))) + 3;
+            // In MCap mode, show fewer decimal places
+            const digits = isMCap ? Math.max(baseDigits - 7, 0) : baseDigits;
             onSymbolResolvedCallback({
               ticker: symbolName,
               name: metadata.name,
-              description: `${metadata.symbol}/USD`,
+              description: `${metadata.symbol}/${isMCap ? 'MCap' : 'USD'}`,
               type: "crypto",
               session: "24x7",
               timezone,
@@ -134,32 +138,37 @@
             onHistoryCallback,
             onErrorCallback
           ) => {
-            console.log(
-              `Getting bars for ${symbolInfo.name} ${resolution} ${
-                periodParams.countBack
-              } ${periodParams.to * 1000}`
-            );
+            console.log(`Getting bars for ${symbolInfo.name} ${resolution} ${periodParams.countBack} ${periodParams.to * 1000}`);
+            
+            // Fetch token data for circulating supply
+            const tokenData = await fetch(
+              `${pricesUrl}/token?token_id=${symbolInfo.full_name.toLowerCase()}`
+            ).then((data) => data.json());
+            
             const url = `${eventsUrl}/v3/price_token/ohlc?token=${
-              symbolInfo.full_name
+              symbolInfo.full_name.toLowerCase()
             }&resolution=${resolution}&count_back=${periodParams.countBack}&to=${
               periodParams.to * 1000
             }`;
             const response = await fetch(url).then((data) => data.json());
             const noData = response.length < periodParams.countBack;
-            const decimals = (await getMetadata(symbolInfo.full_name)).decimals;
+            const decimals = (await getMetadata(symbolInfo.full_name.toLowerCase())).decimals;
             const USDT_DECIMALS = 6;
+            const isMCap = localStorage.getItem('chartMode') === 'mcap';
+            const circulatingSupply = parseFloat(tokenData.circulating_supply) / (10 ** decimals);
+            const multiplier = isMCap ? circulatingSupply : 1;
+
             const bars = response.map((bar) => {
-              bar.open = parseFloat(bar.open) * 10 ** (decimals - USDT_DECIMALS);
-              bar.close = parseFloat(bar.close) * 10 ** (decimals - USDT_DECIMALS);
-              bar.high = parseFloat(bar.high) * 10 ** (decimals - USDT_DECIMALS);
-              bar.low = parseFloat(bar.low) * 10 ** (decimals - USDT_DECIMALS);
+              bar.open = parseFloat(bar.open) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
+              bar.close = parseFloat(bar.close) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
+              bar.high = parseFloat(bar.high) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
+              bar.low = parseFloat(bar.low) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
               bar.volume = parseFloat(bar.volume);
-	      bar.time = bar.timestamp_millis
+              bar.time = bar.timestamp_millis;
               return bar;
             });
             if (!latestBars[symbolInfo.full_name + "/" + resolution]) {
-              latestBars[symbolInfo.full_name + "/" + resolution] =
-                bars[bars.length - 1];
+              latestBars[symbolInfo.full_name + "/" + resolution] = bars[bars.length - 1];
             }
             onHistoryCallback(bars, { noData });
           },
@@ -171,82 +180,91 @@
             onResetCacheNeededCallback
           ) => {
             console.log(`Subscribing to bars of ${symbolInfo.full_name}`);
-            const decimals = (await getMetadata(symbolInfo.full_name)).decimals;
+            const decimals = (await getMetadata(symbolInfo.full_name.toLowerCase())).decimals;
+            
+            // Fetch token data for circulating supply
+            const tokenData = await fetch(
+              `${pricesUrl}/token?token_id=${symbolInfo.full_name.toLowerCase()}`
+            ).then((data) => data.json());
+            
             const USDT_DECIMALS = 6;
-            const ws = new WebSocket(
-              `${wsEventsUrl}/events/price_token`
-            );
-            subscribers[listenerGuid] = { ws };
+            const circulatingSupply = parseFloat(tokenData.circulating_supply) / (10 ** decimals);
+            const ws = new WebSocket(`${wsEventsUrl}/events/price_token`);
+            subscribers[listenerGuid] = { ws, circulatingSupply };  // Store circulatingSupply with the subscriber
+            
             ws.onopen = () => {
-              ws.send(JSON.stringify({"And":[{"path":"token","operator":{"Equals":symbolInfo.full_name}}]}));
+              ws.send(JSON.stringify({"And":[{"path":"token","operator":{"Equals":symbolInfo.full_name.toLowerCase()}}]}));
             };
             ws.onmessage = (e) => {
               const events = JSON.parse(e.data);
-	      for (let data of events) {
-              if (data.token !== symbolInfo.full_name) {
-                return;
+              for (let data of events) {
+                if (data.token !== symbolInfo.full_name.toLowerCase()) {
+                  return;
+                }
+                const time = parseInt(data.timestamp_nanosec) / 1_000_000;
+                const isMCap = localStorage.getItem('chartMode') === 'mcap';
+                const multiplier = isMCap ? circulatingSupply : 1;
+                const tradePrice = parseFloat(data.price_usd) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
+                let barTime;
+                switch (resolution) {
+                  case "1":
+                    barTime = 1 * 60 * 1000;
+                    break;
+                  case "5":
+                    barTime = 5 * 60 * 1000;
+                    break;
+                  case "15":
+                    barTime = 15 * 60 * 1000;
+                    break;
+                  case "60":
+                    barTime = 60 * 60 * 1000;
+                    break;
+                  case "240":
+                    barTime = 240 * 60 * 1000;
+                    break;
+                  case "1D":
+                    barTime = 24 * 60 * 60 * 1000;
+                    break;
+                  case "1W":
+                    barTime = 7 * 24 * 60 * 1000;
+                    break;
+                  default:
+                    throw new Error(`Unexpected resolution ${resolution}`);
+                }
+                const nextBarTime =
+                  latestBars[symbolInfo.full_name + "/" + resolution].timestamp_millis + barTime;
+                if (time > nextBarTime) {
+                  latestBars[symbolInfo.full_name + "/" + resolution] = {
+                    high: tradePrice,
+                    low: tradePrice,
+                    open: latestBars[symbolInfo.full_name + "/" + resolution].close,
+                    close: tradePrice,
+                    volume: 0, // TODO
+                    time: nextBarTime
+                  };
+                } else {
+                  latestBars[symbolInfo.full_name + "/" + resolution] = {
+                    high: Math.max(
+                      latestBars[symbolInfo.full_name + "/" + resolution].high,
+                      tradePrice
+                    ),
+                    low: Math.min(
+                      latestBars[symbolInfo.full_name + "/" + resolution].low,
+                      tradePrice
+                    ),
+                    close: tradePrice,
+                    ...latestBars[symbolInfo.full_name + "/" + resolution]
+                  };
+                }
               }
-              const time = parseInt(data.timestamp_nanosec) / 1_000_000;
-              let barTime;
-              switch (resolution) {
-                case "1":
-                  barTime = 1 * 60 * 1000;
-                  break;
-                case "5":
-                  barTime = 5 * 60 * 1000;
-                  break;
-                case "15":
-                  barTime = 15 * 60 * 1000;
-                  break;
-                case "60":
-                  barTime = 60 * 60 * 1000;
-                  break;
-                case "240":
-                  barTime = 240 * 60 * 1000;
-                  break;
-                case "1D":
-                  barTime = 24 * 60 * 60 * 1000;
-                  break;
-                case "1W":
-                  barTime = 7 * 24 * 60 * 1000;
-                  break;
-                default:
-                  throw new Error(`Unexpected resolution ${resolution}`);
-              }
-              const nextBarTime =
-                latestBars[symbolInfo.full_name + "/" + resolution].timestamp_millis + barTime;
-              const tradePrice =
-                parseFloat(data.price_usd) * 10 ** (decimals - USDT_DECIMALS);
-              if (time > nextBarTime) {
-                latestBars[symbolInfo.full_name + "/" + resolution] = {
-                  high: tradePrice,
-                  low: tradePrice,
-                  open: latestBars[symbolInfo.full_name + "/" + resolution].close,
-                  close: tradePrice,
-                  volume: 0, // TODO
-                  time: nextBarTime
-                };
-              } else {
-                latestBars[symbolInfo.full_name + "/" + resolution] = {
-                  high: Math.max(
-                    latestBars[symbolInfo.full_name + "/" + resolution].high,
-                    tradePrice
-                  ),
-                  low: Math.min(
-                    latestBars[symbolInfo.full_name + "/" + resolution].low,
-                    tradePrice
-                  ),
-                  close: tradePrice,
-                  ...latestBars[symbolInfo.full_name + "/" + resolution]
-                };
-              }
-	      }
               onTick(latestBars[symbolInfo.full_name + "/" + resolution]);
             };
           },
           unsubscribeBars: async (listenerGuid) => {
             console.log(`Unsubscribing from bars: ${listenerGuid}`);
-            subscribers[listenerGuid].ws.close();
+            if (subscribers[listenerGuid] && subscribers[listenerGuid].ws) {
+              subscribers[listenerGuid].ws.close();
+            }
           }
         };
         var widget = (window.tvWidget = new TradingView.widget({
@@ -267,6 +285,75 @@
           ],
           theme,
         }));
+
+        // Add toggle button after widget initialization
+        widget.headerReady().then(function() {
+          let button = widget.createButton();
+          button.style.cursor = 'pointer';
+          
+          let isPrice = localStorage.getItem('chartMode') !== 'mcap';
+          const updateButtonState = () => {
+            button.innerHTML = `
+              <span style="${isPrice ? 'color: #2962FF; font-weight: bold' : ''}">Price</span>
+              /
+              <span style="${!isPrice ? 'color: #2962FF; font-weight: bold' : ''}">MCap</span>
+            `;
+          };
+          
+          updateButtonState();
+          
+          button.addEventListener("click", function() {
+            isPrice = !isPrice;
+            localStorage.setItem('chartMode', isPrice ? 'price' : 'mcap');
+            
+            // Save current widget state before cleanup
+            const currentSymbol = widget.activeChart().symbol();
+            const currentResolution = widget.activeChart().resolution();
+            
+            // Close all existing WebSocket connections
+            Object.values(subscribers).forEach(sub => {
+              if (sub && sub.ws) {
+                sub.ws.close();
+              }
+            });
+            
+            // Clear all caches
+            Object.keys(latestBars).forEach(key => delete latestBars[key]);
+            Object.keys(subscribers).forEach(key => delete subscribers[key]);
+            
+            // Remove old widget
+            widget.remove();
+            
+            // Create new widget
+            widget = window.tvWidget = new TradingView.widget({
+              library_path: "https://dynamic-moxie-09a484.netlify.app/",
+              fullscreen: true,
+              symbol: currentSymbol.toLowerCase(),
+              interval: currentResolution,
+              container: "tv_chart_container",
+              datafeed,
+              locale: "en",
+              disabled_features: ["use_localstorage_for_settings"],
+              enabled_features: [
+                "show_symbol_logos",
+                "custom_resolutions",
+                "seconds_resolution",
+                "chart_style_hilo_last_price"
+              ],
+              theme,
+            });
+            
+            // Reinitialize the button after new widget is ready
+            widget.headerReady().then(() => {
+              const newButton = widget.createButton();
+              newButton.style.cursor = 'pointer';
+              button = newButton;
+              updateButtonState();
+              // Reattach click handler
+              newButton.addEventListener("click", arguments.callee);
+            });
+          });
+        });
       }
       
       async function getMetadata(account_id) {
@@ -286,7 +373,7 @@
         if (tokens[account_id]) {
           return tokens[account_id];
         }
-        tokens[account_id] = await fetch("https://beta.rpc.mainnet.near.org/", {
+        tokens[account_id] = await fetch("https://rpc.intear.tech/", {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
