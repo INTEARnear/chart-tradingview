@@ -11,6 +11,7 @@
         const pricesUrl = isTestnet ? 'https://prices-testnet.intear.tech' : 'https://prices.intear.tech';
         const eventsUrl = isTestnet ? 'https://events-v3-testnet.intear.tech' : 'https://events-v3.intear.tech';
         const wsEventsUrl = isTestnet ? 'wss://ws-events-v3-testnet.intear.tech' : 'wss://ws-events-v3.intear.tech';
+	const rpcUrl = isTestnet ? "https://rpc.testnet.near.org" : "https://rpc.intear.tech/";
 
         const params = new URLSearchParams(window.location.search);
         const isDark =
@@ -373,7 +374,7 @@
         if (tokens[account_id]) {
           return tokens[account_id];
         }
-        tokens[account_id] = await fetch("https://rpc.intear.tech/", {
+        tokens[account_id] = await fetch(rpcUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
