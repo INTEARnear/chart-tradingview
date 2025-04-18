@@ -6,13 +6,12 @@
 		<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
 		<script type="text/javascript" src="https://dynamic-moxie-09a484.netlify.app/charting_library.standalone.js"></script>
     <script>
-      function initOnReady() {
         const isTestnet = window.location.hostname.includes('testnet');
         const pricesUrl = isTestnet ? 'https://prices-testnet.intear.tech' : 'https://prices.intear.tech';
         const eventsUrl = isTestnet ? 'https://events-v3-testnet.intear.tech' : 'https://events-v3.intear.tech';
         const wsEventsUrl = isTestnet ? 'wss://ws-events-v3-testnet.intear.tech' : 'wss://ws-events-v3.intear.tech';
 	const rpcUrl = isTestnet ? "https://rpc.testnet.near.org" : "https://rpc.intear.tech/";
-
+      function initOnReady() {
         const params = new URLSearchParams(window.location.search);
         const isDark =
           window.matchMedia("(prefers-color-scheme: dark)").matches ||
