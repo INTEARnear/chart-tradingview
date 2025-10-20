@@ -10,7 +10,7 @@
         const pricesUrl = isTestnet ? 'https://prices-testnet.intear.tech' : 'https://prices.intear.tech';
         const eventsUrl = isTestnet ? 'https://events-v3-testnet.intear.tech' : 'https://events-v3.intear.tech';
         const wsEventsUrl = isTestnet ? 'wss://ws-events-v3-testnet.intear.tech' : 'wss://ws-events-v3.intear.tech';
-	const rpcUrl = isTestnet ? "https://rpc.testnet.near.org" : "https://rpc.intea.rs/";
+	      const rpcUrl = isTestnet ? "https://testnet-rpc.intea.rs" : "https://rpc.intea.rs/";
       function initOnReady() {
         const params = new URLSearchParams(window.location.search);
         const isDark =
@@ -40,15 +40,15 @@
             "-180": "Asia/Bahrain",
             "-120": "Africa/Cairo",
             "-60": "Africa/Casablanca",
-            0: "Atlantic/Reykjavik",
-            180: "America/Sao_Paulo",
-            240: "America/Santiago",
-            300: "America/Bogota",
-            360: "America/Chicago",
-            420: "US/Mountain",
-            480: "America/Los_Angeles",
-            540: "America/Anchorage",
-            600: "Pacific/Honolulu"
+            "0": "Atlantic/Reykjavik",
+            "180": "America/Sao_Paulo",
+            "240": "America/Santiago",
+            "300": "America/Bogota",
+            "360": "America/Chicago",
+            "420": "US/Mountain",
+            "480": "America/Los_Angeles",
+            "540": "America/Anchorage",
+            "600": "Pacific/Honolulu"
           }[new Date().getTimezoneOffset().toString()] ?? "Etc/UTC"; // TODO doesn't work
         const latestBars = {};
         const subscribers = {};
@@ -286,6 +286,18 @@
           theme,
         }));
 
+        // Subscribe to symbol changes and notify parent window
+        widget.onChartReady(() => {
+          widget.activeChart().onSymbolChanged().subscribe(null, () => {
+            const currentSymbol = widget.activeChart().symbol();
+            console.log(`Symbol changed to: ${currentSymbol}`);
+            window.parent?.postMessage({
+              type: 'symbolChange',
+              contractId: currentSymbol.toLowerCase()
+            }, '*');
+          });
+        });
+
         // Add toggle button after widget initialization
         widget.headerReady().then(function() {
           let button = widget.createButton();
@@ -341,6 +353,18 @@
                 "chart_style_hilo_last_price"
               ],
               theme,
+            });
+            
+            // Resubscribe to symbol changes for the new widget
+            widget.onChartReady(() => {
+              widget.activeChart().onSymbolChanged().subscribe(null, () => {
+                const currentSymbol = widget.activeChart().symbol();
+                console.log(`Symbol changed to: ${currentSymbol}`);
+                window.parent?.postMessage({
+                  type: 'symbolChange',
+                  contractId: currentSymbol.toLowerCase()
+                }, '*');
+              });
             });
             
             // Reinitialize the button after new widget is ready
