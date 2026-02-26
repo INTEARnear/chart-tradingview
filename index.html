@@ -1,433 +1,531 @@
 <!DOCTYPE HTML>
 <html>
-	<head>
-		<title>TradingView with Intear's price data</title>
-		<!-- Fix for iOS Safari zooming bug -->
-		<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
-		<script type="text/javascript" src="https://dynamic-moxie-09a484.netlify.app/charting_library.standalone.js"></script>
-    <script>
-        const isTestnet = window.location.hostname.includes('testnet');
-        const pricesUrl = isTestnet ? 'https://prices-testnet.intear.tech' : 'https://prices.intear.tech';
-        const eventsUrl = isTestnet ? 'https://events-v3-testnet.intear.tech' : 'https://events-v3.intear.tech';
-        const wsEventsUrl = isTestnet ? 'wss://ws-events-v3-testnet.intear.tech' : 'wss://ws-events-v3.intear.tech';
-	      const rpcUrl = isTestnet ? "https://testnet-rpc.intea.rs" : "https://rpc.intea.rs/";
-      function initOnReady() {
-        const params = new URLSearchParams(window.location.search);
-        const isDark =
-          window.matchMedia("(prefers-color-scheme: dark)").matches ||
-          params.get("theme") != "light";
-        const theme = isDark ? "dark" : "light";
-        const symbol = params.get("token") ?? (isTestnet ? "wrap.testnet" : "wrap.near");
-        const subscriptions = {};
-        const timezone =
-          {
-            "-780": "Pacific/Fakaofo",
-            "-765": "Pacific/Chatham",
-            "-720": "Pacific/Auckland",
-            "-660": "Pacific/Norfolk",
-            "-540": "Asia/Seoul",
-            "-600": "Australia/Brisbane",
-            "-570": "Australia/Adelaide",
-            "-480": "Asia/Chongqing",
-            "-420": "Asia/Bangkok",
-            "-390": "Asia/Yangon",
-            "-360": "Asia/Almaty",
-            "-330": "Asia/Colombo",
-            "-345": "Asia/Kathmandu",
-            "-300": "Asia/Ashkhabad",
-            "-240": "Asia/Dubai",
-            "-210": "Asia/Tehran",
-            "-180": "Asia/Bahrain",
-            "-120": "Africa/Cairo",
-            "-60": "Africa/Casablanca",
-            "0": "Atlantic/Reykjavik",
-            "180": "America/Sao_Paulo",
-            "240": "America/Santiago",
-            "300": "America/Bogota",
-            "360": "America/Chicago",
-            "420": "US/Mountain",
-            "480": "America/Los_Angeles",
-            "540": "America/Anchorage",
-            "600": "Pacific/Honolulu"
-          }[new Date().getTimezoneOffset().toString()] ?? "Etc/UTC"; // TODO doesn't work
-        const latestBars = {};
-        const subscribers = {};
-        const datafeed = {
-          onReady: (callback) => {
-            console.log("Loading TradingView");
-            setTimeout(() =>
-              callback({
-                supports_search: true,
-                supports_group_request: false,
-                supports_marks: true,
-                supports_timescale_marks: true,
-                supports_time: true,
-                supported_resolutions: ["1", "5", "15", "60", "4h", "D", "W"]
-              })
-            );
-          },
-          searchSymbols: async (
-            userInput,
-            exchange,
-            symbolType,
-            onResultReadyCallback
-          ) => {
-            console.log(`Searching ${userInput}`);
-            const results = await fetch(
-              `${pricesUrl}/token-search?q=${encodeURIComponent(
-                userInput
-              )}&n=20`
-            ).then((res) => res.json());
-            const symbols = results.map(async (result) => {
-              const metadata = await getMetadata(result.account_id);
-              const icon = metadata.icon;
-              return {
-                description: metadata.name,
-                exchange,
-                symbol: metadata.symbol,
-                ticker: result.account_id,
-                timezone,
-                logo_urls: icon ? [icon] : []
-              };
-            });
-            const readySymbols = await Promise.all(symbols);
-            onResultReadyCallback(readySymbols);
-          },
-          resolveSymbol: async (
-            symbolName,
-            onSymbolResolvedCallback,
-            onResolveErrorCallback,
-            extension
-          ) => {
-            console.log(`Loading ${symbolName}`);
-            const metadata = await getMetadata(symbolName);
-            const price = await fetch(
-              `${pricesUrl}/price?token_id=${symbolName}`
-            ).then((data) => data.json());
-            const isMCap = localStorage.getItem('chartMode') === 'mcap';
-            // Adjust digits based on mode
-            const baseDigits = Math.ceil(Math.max(0, -Math.log10(price))) + 3;
-            // In MCap mode, show fewer decimal places
-            const digits = isMCap ? Math.max(baseDigits - 7, 0) : baseDigits;
-            onSymbolResolvedCallback({
-              ticker: symbolName,
-              name: metadata.name,
-              description: `${metadata.symbol}/${isMCap ? 'MCap' : 'USD'}`,
-              type: "crypto",
-              session: "24x7",
-              timezone,
-              exchange: "Intear",
-              minmov: 1,
-              pricescale: 10 ** digits,
-              has_intraday: true,
-              intraday_multipliers: ["1","60"],
-              has_daily: true,
-              daily_multipliers: ["1"],
-              has_empty_bars: true,
-              has_weekly_and_monthly: false,
-              visible_plots_set: "ohlcv",
-              volume_precision: 2,
-              data_status: "streaming",
-              logo_urls: metadata.icon ? [metadata.icon] : []
-            });
-          },
-          getBars: async (
-            symbolInfo,
-            resolution,
-            periodParams,
-            onHistoryCallback,
-            onErrorCallback
-          ) => {
-            console.log(`Getting bars for ${symbolInfo.name} ${resolution} ${periodParams.countBack} ${periodParams.to * 1000}`);
-            
-            // Fetch token data for circulating supply
-            const tokenData = await fetch(
-              `${pricesUrl}/token?token_id=${symbolInfo.full_name.toLowerCase()}`
-            ).then((data) => data.json());
-            
-            const url = `${eventsUrl}/v3/price_token/ohlc?token=${
-              symbolInfo.full_name.toLowerCase()
-            }&resolution=${resolution}&count_back=${periodParams.countBack}&to=${
-              periodParams.to * 1000
-            }`;
-            const response = await fetch(url).then((data) => data.json());
-            const noData = response.length < periodParams.countBack;
-            const decimals = (await getMetadata(symbolInfo.full_name.toLowerCase())).decimals;
-            const USDT_DECIMALS = 6;
-            const isMCap = localStorage.getItem('chartMode') === 'mcap';
-            const circulatingSupply = parseFloat(tokenData.circulating_supply) / (10 ** decimals);
-            const multiplier = isMCap ? circulatingSupply : 1;
 
-            const bars = response.map((bar) => {
-              bar.open = parseFloat(bar.open) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
-              bar.close = parseFloat(bar.close) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
-              bar.high = parseFloat(bar.high) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
-              bar.low = parseFloat(bar.low) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
-              bar.volume = parseFloat(bar.volume);
-              bar.time = bar.timestamp_millis;
-              return bar;
-            });
-            if (!latestBars[symbolInfo.full_name + "/" + resolution]) {
-              latestBars[symbolInfo.full_name + "/" + resolution] = bars[bars.length - 1];
-            }
-            onHistoryCallback(bars, { noData });
-          },
-          subscribeBars: async (
-            symbolInfo,
-            resolution,
-            onTick,
-            listenerGuid,
-            onResetCacheNeededCallback
-          ) => {
-            console.log(`Subscribing to bars of ${symbolInfo.full_name}`);
-            const decimals = (await getMetadata(symbolInfo.full_name.toLowerCase())).decimals;
-            
-            // Fetch token data for circulating supply
-            const tokenData = await fetch(
-              `${pricesUrl}/token?token_id=${symbolInfo.full_name.toLowerCase()}`
-            ).then((data) => data.json());
-            
-            const USDT_DECIMALS = 6;
-            const circulatingSupply = parseFloat(tokenData.circulating_supply) / (10 ** decimals);
-            const ws = new WebSocket(`${wsEventsUrl}/events/price_token`);
-            subscribers[listenerGuid] = { ws, circulatingSupply };  // Store circulatingSupply with the subscriber
-            
-            ws.onopen = () => {
-              ws.send(JSON.stringify({"And":[{"path":"token","operator":{"Equals":symbolInfo.full_name.toLowerCase()}}]}));
-            };
-            ws.onmessage = (e) => {
-              const events = JSON.parse(e.data);
-              for (let data of events) {
-                if (data.token !== symbolInfo.full_name.toLowerCase()) {
-                  return;
-                }
-                const time = parseInt(data.timestamp_nanosec) / 1_000_000;
-                const isMCap = localStorage.getItem('chartMode') === 'mcap';
-                const multiplier = isMCap ? circulatingSupply : 1;
-                const tradePrice = parseFloat(data.price_usd) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
-                let barTime;
-                switch (resolution) {
-                  case "1":
-                    barTime = 1 * 60 * 1000;
-                    break;
-                  case "5":
-                    barTime = 5 * 60 * 1000;
-                    break;
-                  case "15":
-                    barTime = 15 * 60 * 1000;
-                    break;
-                  case "60":
-                    barTime = 60 * 60 * 1000;
-                    break;
-                  case "240":
-                    barTime = 240 * 60 * 1000;
-                    break;
-                  case "1D":
-                    barTime = 24 * 60 * 60 * 1000;
-                    break;
-                  case "1W":
-                    barTime = 7 * 24 * 60 * 1000;
-                    break;
-                  default:
-                    throw new Error(`Unexpected resolution ${resolution}`);
-                }
-                const nextBarTime =
-                  latestBars[symbolInfo.full_name + "/" + resolution].timestamp_millis + barTime;
-                if (time > nextBarTime) {
-                  latestBars[symbolInfo.full_name + "/" + resolution] = {
-                    high: tradePrice,
-                    low: tradePrice,
-                    open: latestBars[symbolInfo.full_name + "/" + resolution].close,
-                    close: tradePrice,
-                    volume: 0, // TODO
-                    time: nextBarTime
-                  };
-                } else {
-                  latestBars[symbolInfo.full_name + "/" + resolution] = {
-                    high: Math.max(
-                      latestBars[symbolInfo.full_name + "/" + resolution].high,
-                      tradePrice
-                    ),
-                    low: Math.min(
-                      latestBars[symbolInfo.full_name + "/" + resolution].low,
-                      tradePrice
-                    ),
-                    close: tradePrice,
-                    ...latestBars[symbolInfo.full_name + "/" + resolution]
-                  };
-                }
-              }
-              onTick(latestBars[symbolInfo.full_name + "/" + resolution]);
-            };
-          },
-          unsubscribeBars: async (listenerGuid) => {
-            console.log(`Unsubscribing from bars: ${listenerGuid}`);
-            if (subscribers[listenerGuid] && subscribers[listenerGuid].ws) {
-              subscribers[listenerGuid].ws.close();
-            }
-          }
+<head>
+  <title>TradingView with Intear's price data</title>
+  <!-- Fix for iOS Safari zooming bug -->
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
+  <script type="text/javascript" src="https://dynamic-moxie-09a484.netlify.app/charting_library.standalone.js"></script>
+  <script>
+    const isTestnet = window.location.hostname.includes('testnet');
+    const pricesUrl = isTestnet ? 'https://prices-testnet.intear.tech' : 'https://prices.intear.tech';
+    const eventsUrl = isTestnet ? 'https://events-v3-testnet.intear.tech' : 'https://events-v3.intear.tech';
+    const wsEventsUrl = isTestnet ? 'wss://ws-events-v3-testnet.intear.tech' : 'wss://ws-events-v3.intear.tech';
+    function initOnReady() {
+      const params = new URLSearchParams(window.location.search);
+      const isDark = params.get("theme") ? (params.get("theme") !== "light") : window.matchMedia("(prefers-color-scheme: dark)").matches;
+      const theme = isDark ? "dark" : "light";
+      console.log("theme", theme);
+      const symbol = params.get("token") ?? (isTestnet ? "wrap.testnet" : "wrap.near");
+      const searchEnabled = params.get("search") !== "false";
+      const disabledFeatures = searchEnabled
+        ? ["use_localstorage_for_settings"]
+        : ["use_localstorage_for_settings", "header_symbol_search"];
+      const subscriptions = {};
+      const timezone =
+        {
+          "-780": "Pacific/Fakaofo",
+          "-765": "Pacific/Chatham",
+          "-720": "Pacific/Auckland",
+          "-660": "Pacific/Norfolk",
+          "-540": "Asia/Seoul",
+          "-600": "Australia/Brisbane",
+          "-570": "Australia/Adelaide",
+          "-480": "Asia/Chongqing",
+          "-420": "Asia/Bangkok",
+          "-390": "Asia/Yangon",
+          "-360": "Asia/Almaty",
+          "-330": "Asia/Colombo",
+          "-345": "Asia/Kathmandu",
+          "-300": "Asia/Ashkhabad",
+          "-240": "Asia/Dubai",
+          "-210": "Asia/Tehran",
+          "-180": "Asia/Bahrain",
+          "-120": "Africa/Cairo",
+          "-60": "Africa/Casablanca",
+          "0": "Atlantic/Reykjavik",
+          "180": "America/Sao_Paulo",
+          "240": "America/Santiago",
+          "300": "America/Bogota",
+          "360": "America/Chicago",
+          "420": "US/Mountain",
+          "480": "America/Los_Angeles",
+          "540": "America/Anchorage",
+          "600": "Pacific/Honolulu"
+        }[new Date().getTimezoneOffset().toString()] ?? "Etc/UTC"; // TODO doesn't work
+      const latestBars = {};
+      const subscribers = {};
+      const USDT_DECIMALS = 6;
+
+      function resolutionToMs(resolution) {
+        switch (resolution) {
+          case "1":
+            return 60 * 1000;
+          case "5":
+            return 5 * 60 * 1000;
+          case "15":
+            return 15 * 60 * 1000;
+          case "60":
+            return 60 * 60 * 1000;
+          case "4h":
+            return 4 * 60 * 60 * 1000;
+          case "D":
+            return 24 * 60 * 60 * 1000;
+          case "W":
+            return 7 * 24 * 60 * 60 * 1000;
+          default:
+            throw new Error(`Unexpected resolution ${resolution}`);
+        }
+      }
+
+      function alignTimeToResolution(timestampMs, resolution) {
+        if (resolution === "D") {
+          const date = new Date(timestampMs);
+          return Date.UTC(
+            date.getUTCFullYear(),
+            date.getUTCMonth(),
+            date.getUTCDate()
+          );
+        }
+
+        if (resolution === "W") {
+          const date = new Date(timestampMs);
+          const dayOfWeek = date.getUTCDay();
+          const daysSinceMonday = (dayOfWeek + 6) % 7;
+          const startOfDayUtc = Date.UTC(
+            date.getUTCFullYear(),
+            date.getUTCMonth(),
+            date.getUTCDate()
+          );
+          return startOfDayUtc - daysSinceMonday * 24 * 60 * 60 * 1000;
+        }
+
+        const intervalMs = resolutionToMs(resolution);
+        return Math.floor(timestampMs / intervalMs) * intervalMs;
+      }
+
+      function toUnixMilliseconds(timestampNanosec) {
+        return Number(BigInt(timestampNanosec) / 1_000_000n);
+      }
+
+      function createFlatBar(time, price) {
+        return {
+          time,
+          open: price,
+          high: price,
+          low: price,
+          close: price,
+          volume: 0
         };
-        var widget = (window.tvWidget = new TradingView.widget({
-          library_path: "https://dynamic-moxie-09a484.netlify.app/",
-          // debug: true, // uncomment this line to see Library errors and warnings in the console
-          fullscreen: true,
-          symbol: symbol,
-          interval: params.has("interval") ? params.get("interval").replace(/m$/, "") : "1",
-          container: "tv_chart_container",
-          datafeed,
-          locale: "en",
-          disabled_features: ["use_localstorage_for_settings"],
-          enabled_features: [
-            "show_symbol_logos",
-            "custom_resolutions",
-            "seconds_resolution",
-            "chart_style_hilo_last_price"
-          ],
-          theme,
-        }));
+      }
 
-        // Subscribe to symbol changes and notify parent window
-        widget.onChartReady(() => {
-          widget.activeChart().onSymbolChanged().subscribe(null, () => {
-            const currentSymbol = widget.activeChart().symbol();
-            console.log(`Symbol changed to: ${currentSymbol}`);
-            window.parent?.postMessage({
-              type: 'symbolChange',
-              contractId: currentSymbol.toLowerCase()
-            }, '*');
+      const datafeed = {
+        onReady: (callback) => {
+          console.log("Loading TradingView");
+          setTimeout(() =>
+            callback({
+              supports_search: searchEnabled,
+              supports_group_request: false,
+              supports_marks: true,
+              supports_timescale_marks: true,
+              supports_time: true,
+              supported_resolutions: ["1", "5", "15", "60", "4h", "D", "W"]
+            })
+          );
+        },
+        searchSymbols: async (
+          userInput,
+          exchange,
+          symbolType,
+          onResultReadyCallback
+        ) => {
+          if (!searchEnabled) {
+            onResultReadyCallback([]);
+            return;
+          }
+
+          console.log(`Searching ${userInput}`);
+          const results = await fetch(
+            `${pricesUrl}/token-search?q=${encodeURIComponent(
+              userInput
+            )}&n=20`
+          ).then((res) => res.json());
+          const symbols = results.map(async (result) => {
+            const metadata = await getMetadata(result.account_id, result);
+            const icon = metadata.icon;
+            return {
+              description: metadata.name,
+              exchange,
+              symbol: metadata.symbol,
+              ticker: result.account_id,
+              timezone,
+              logo_urls: icon ? [icon] : []
+            };
           });
-        });
+          const readySymbols = await Promise.all(symbols);
+          onResultReadyCallback(readySymbols);
+        },
+        resolveSymbol: async (
+          symbolName,
+          onSymbolResolvedCallback,
+          onResolveErrorCallback,
+          extension
+        ) => {
+          console.log(`Loading ${symbolName}`);
+          const metadata = await getMetadata(symbolName);
+          const price = await fetch(
+            `${pricesUrl}/price?token_id=${symbolName}`
+          ).then((data) => data.json());
+          const isMCap = localStorage.getItem('chartMode') === 'mcap';
+          // Adjust digits based on mode
+          const baseDigits = Math.ceil(Math.max(0, -Math.log10(price))) + 3;
+          // In MCap mode, show fewer decimal places
+          const digits = isMCap ? Math.max(baseDigits - 7, 0) : baseDigits;
+          onSymbolResolvedCallback({
+            ticker: symbolName,
+            name: metadata.name,
+            description: `${metadata.symbol}/${isMCap ? 'MCap' : 'USD'}`,
+            type: "crypto",
+            session: "24x7",
+            timezone,
+            exchange: "Intear",
+            minmov: 1,
+            pricescale: 10 ** digits,
+            has_intraday: true,
+            intraday_multipliers: ["1", "60"],
+            has_daily: true,
+            daily_multipliers: ["1"],
+            has_empty_bars: true,
+            has_weekly_and_monthly: false,
+            visible_plots_set: "ohlcv",
+            volume_precision: 2,
+            data_status: "streaming",
+            logo_urls: metadata.icon ? [metadata.icon] : []
+          });
+        },
+        getBars: async (
+          symbolInfo,
+          resolution,
+          periodParams,
+          onHistoryCallback,
+          onErrorCallback
+        ) => {
+          console.log(`Getting bars for ${symbolInfo.name} ${resolution} ${periodParams.countBack} ${periodParams.to * 1000}`);
 
-        // Add toggle button after widget initialization
-        widget.headerReady().then(function() {
-          let button = widget.createButton();
-          button.style.cursor = 'pointer';
-          
-          let isPrice = localStorage.getItem('chartMode') !== 'mcap';
-          const updateButtonState = () => {
-            button.innerHTML = `
+          // Fetch token data for circulating supply
+          const tokenData = await fetch(
+            `${pricesUrl}/token?token_id=${symbolInfo.full_name.toLowerCase()}`
+          ).then((data) => data.json());
+
+          const url = `${eventsUrl}/v3/price_token/ohlc?token=${symbolInfo.full_name.toLowerCase()
+            }&resolution=${resolution}&count_back=${periodParams.countBack}&to=${periodParams.to * 1000
+            }`;
+          const response = await fetch(url).then((data) => data.json());
+          const noData = response.length < periodParams.countBack;
+          const decimals = (await getMetadata(symbolInfo.full_name.toLowerCase())).decimals;
+          const isMCap = localStorage.getItem('chartMode') === 'mcap';
+          const circulatingSupply = parseFloat(tokenData.circulating_supply) / (10 ** decimals);
+          const multiplier = isMCap ? circulatingSupply : 1;
+
+          const bars = response.map((bar) => {
+            bar.open = parseFloat(bar.open) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
+            bar.close = parseFloat(bar.close) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
+            bar.high = parseFloat(bar.high) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
+            bar.low = parseFloat(bar.low) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
+            bar.volume = parseFloat(bar.volume);
+            bar.time = bar.timestamp_millis;
+            return bar;
+          });
+          latestBars[symbolInfo.full_name + "/" + resolution] = bars[bars.length - 1];
+          onHistoryCallback(bars, { noData });
+        },
+        subscribeBars: async (
+          symbolInfo,
+          resolution,
+          onTick,
+          listenerGuid,
+          onResetCacheNeededCallback
+        ) => {
+          console.log(`Subscribing to bars of ${symbolInfo.full_name} @ ${resolution}`);
+          const tokenId = symbolInfo.full_name.toLowerCase();
+          const streamKey = symbolInfo.full_name + "/" + resolution;
+          const decimals = (await getMetadata(tokenId)).decimals;
+
+          // Fetch token data for circulating supply
+          const tokenData = await fetch(
+            `${pricesUrl}/token?token_id=${tokenId}`
+          ).then((data) => data.json());
+
+          const circulatingSupply = parseFloat(tokenData.circulating_supply) / (10 ** decimals);
+          const ws = new WebSocket(`${wsEventsUrl}/events/price_token`);
+          subscribers[listenerGuid] = { ws, circulatingSupply };
+
+          ws.onopen = () => {
+            ws.send(JSON.stringify({ "And": [{ "path": "token", "operator": { "Equals": tokenId } }] }));
+          };
+
+          ws.onmessage = (e) => {
+            let payload;
+            try {
+              payload = JSON.parse(e.data);
+            } catch (error) {
+              console.log("Malformed websocket payload (JSON parse failed):", error);
+              return;
+            }
+
+            if (!Array.isArray(payload)) {
+              console.log("Malformed websocket payload (expected array):", payload);
+              return;
+            }
+
+            const events = payload;
+            for (const data of events) {
+              if (data.token !== tokenId) {
+                continue;
+              }
+
+              let time;
+              let rawPrice;
+              try {
+                time = toUnixMilliseconds(data.timestamp_nanosec);
+                rawPrice = Number(data.price_usd);
+              } catch (error) {
+                console.log("Malformed price_token event:", data, error);
+                continue;
+              }
+
+              if (!Number.isFinite(time) || !Number.isFinite(rawPrice)) {
+                console.log("Malformed price_token numeric fields:", data);
+                continue;
+              }
+
+              const isMCap = localStorage.getItem('chartMode') === 'mcap';
+              const multiplier = isMCap ? circulatingSupply : 1;
+              const tradePrice = rawPrice * 10 ** (decimals - USDT_DECIMALS) * multiplier;
+              const eventBarTime = alignTimeToResolution(time, resolution);
+              const latestBar = latestBars[streamKey];
+              if (!latestBar || !Number.isFinite(latestBar.time)) {
+                console.log("Missing latest bar for stream:", streamKey);
+                continue;
+              }
+
+              const latestBarTime = latestBar.time;
+              if (eventBarTime < latestBarTime) {
+                console.log("Out-of-order price_token event ignored:", data);
+                continue;
+              }
+
+              if (eventBarTime === latestBarTime) {
+                const updatedBar = {
+                  ...latestBar,
+                  high: Math.max(latestBar.high, tradePrice),
+                  low: Math.min(latestBar.low, tradePrice),
+                  close: tradePrice
+                };
+                latestBars[streamKey] = updatedBar;
+                onTick(updatedBar);
+                continue;
+              }
+
+              let carryPrice = latestBar.close;
+              const intervalMs = resolutionToMs(resolution);
+              let nextTime = latestBarTime + intervalMs;
+
+              while (nextTime < eventBarTime) {
+                const emptyBar = createFlatBar(nextTime, carryPrice);
+                latestBars[streamKey] = emptyBar;
+                onTick(emptyBar);
+                nextTime += intervalMs;
+              }
+
+              const nextTradeBar = {
+                time: eventBarTime,
+                open: carryPrice,
+                high: Math.max(carryPrice, tradePrice),
+                low: Math.min(carryPrice, tradePrice),
+                close: tradePrice,
+                volume: 0
+              };
+
+              latestBars[streamKey] = nextTradeBar;
+              onTick(nextTradeBar);
+            }
+          };
+
+          ws.onerror = (error) => {
+            console.error(`WebSocket error for ${tokenId} @ ${resolution}:`, error);
+          };
+
+          ws.onclose = () => {
+            if (subscribers[listenerGuid]?.ws === ws) {
+              delete subscribers[listenerGuid];
+            }
+          };
+        },
+        unsubscribeBars: async (listenerGuid) => {
+          console.log(`Unsubscribing from bars: ${listenerGuid}`);
+          if (subscribers[listenerGuid] && subscribers[listenerGuid].ws) {
+            subscribers[listenerGuid].ws.close();
+          }
+        }
+      };
+      var widget = (window.tvWidget = new TradingView.widget({
+        library_path: "https://dynamic-moxie-09a484.netlify.app/",
+        // debug: true, // uncomment this line to see Library errors and warnings in the console
+        fullscreen: true,
+        symbol: symbol,
+        interval: params.has("interval") ? params.get("interval").replace(/m$/, "") : "1",
+        container: "tv_chart_container",
+        datafeed,
+        locale: "en",
+        disabled_features: disabledFeatures,
+        enabled_features: [
+          "show_symbol_logos",
+          "custom_resolutions",
+          "seconds_resolution",
+          "chart_style_hilo_last_price"
+        ],
+        theme,
+      }));
+
+      // Subscribe to symbol changes and notify parent window
+      widget.onChartReady(() => {
+        widget.activeChart().onSymbolChanged().subscribe(null, () => {
+          const currentSymbol = widget.activeChart().symbol();
+          console.log(`Symbol changed to: ${currentSymbol}`);
+          window.parent?.postMessage({
+            type: 'symbolChange',
+            contractId: currentSymbol.toLowerCase()
+          }, '*');
+        });
+      });
+
+      // Add toggle button after widget initialization
+      widget.headerReady().then(function () {
+        let button = widget.createButton();
+        button.style.cursor = 'pointer';
+
+        let isPrice = localStorage.getItem('chartMode') !== 'mcap';
+        const updateButtonState = () => {
+          button.innerHTML = `
               <span style="${isPrice ? 'color: #2962FF; font-weight: bold' : ''}">Price</span>
               /
               <span style="${!isPrice ? 'color: #2962FF; font-weight: bold' : ''}">MCap</span>
             `;
-          };
-          
-          updateButtonState();
-          
-          button.addEventListener("click", function() {
-            isPrice = !isPrice;
-            localStorage.setItem('chartMode', isPrice ? 'price' : 'mcap');
-            
-            // Save current widget state before cleanup
-            const currentSymbol = widget.activeChart().symbol();
-            const currentResolution = widget.activeChart().resolution();
-            
-            // Close all existing WebSocket connections
-            Object.values(subscribers).forEach(sub => {
-              if (sub && sub.ws) {
-                sub.ws.close();
-              }
-            });
-            
-            // Clear all caches
-            Object.keys(latestBars).forEach(key => delete latestBars[key]);
-            Object.keys(subscribers).forEach(key => delete subscribers[key]);
-            
-            // Remove old widget
-            widget.remove();
-            
-            // Create new widget
-            widget = window.tvWidget = new TradingView.widget({
-              library_path: "https://dynamic-moxie-09a484.netlify.app/",
-              fullscreen: true,
-              symbol: currentSymbol.toLowerCase(),
-              interval: currentResolution,
-              container: "tv_chart_container",
-              datafeed,
-              locale: "en",
-              disabled_features: ["use_localstorage_for_settings"],
-              enabled_features: [
-                "show_symbol_logos",
-                "custom_resolutions",
-                "seconds_resolution",
-                "chart_style_hilo_last_price"
-              ],
-              theme,
-            });
-            
-            // Resubscribe to symbol changes for the new widget
-            widget.onChartReady(() => {
-              widget.activeChart().onSymbolChanged().subscribe(null, () => {
-                const currentSymbol = widget.activeChart().symbol();
-                console.log(`Symbol changed to: ${currentSymbol}`);
-                window.parent?.postMessage({
-                  type: 'symbolChange',
-                  contractId: currentSymbol.toLowerCase()
-                }, '*');
-              });
-            });
-            
-            // Reinitialize the button after new widget is ready
-            widget.headerReady().then(() => {
-              const newButton = widget.createButton();
-              newButton.style.cursor = 'pointer';
-              button = newButton;
-              updateButtonState();
-              // Reattach click handler
-              newButton.addEventListener("click", arguments.callee);
+        };
+
+        updateButtonState();
+
+        button.addEventListener("click", function () {
+          isPrice = !isPrice;
+          localStorage.setItem('chartMode', isPrice ? 'price' : 'mcap');
+
+          // Save current widget state before cleanup
+          const currentSymbol = widget.activeChart().symbol();
+          const currentResolution = widget.activeChart().resolution();
+
+          // Close all existing WebSocket connections
+          Object.values(subscribers).forEach(sub => {
+            if (sub && sub.ws) {
+              sub.ws.close();
+            }
+          });
+
+          // Clear all caches
+          Object.keys(latestBars).forEach(key => delete latestBars[key]);
+          Object.keys(subscribers).forEach(key => delete subscribers[key]);
+
+          // Remove old widget
+          widget.remove();
+
+          // Create new widget
+          widget = window.tvWidget = new TradingView.widget({
+            library_path: "https://dynamic-moxie-09a484.netlify.app/",
+            fullscreen: true,
+            symbol: currentSymbol.toLowerCase(),
+            interval: currentResolution,
+            container: "tv_chart_container",
+            datafeed,
+            locale: "en",
+            disabled_features: disabledFeatures,
+            enabled_features: [
+              "show_symbol_logos",
+              "custom_resolutions",
+              "seconds_resolution",
+              "chart_style_hilo_last_price"
+            ],
+            theme,
+          });
+
+          // Resubscribe to symbol changes for the new widget
+          widget.onChartReady(() => {
+            widget.activeChart().onSymbolChanged().subscribe(null, () => {
+              const currentSymbol = widget.activeChart().symbol();
+              console.log(`Symbol changed to: ${currentSymbol}`);
+              window.parent?.postMessage({
+                type: 'symbolChange',
+                contractId: currentSymbol.toLowerCase()
+              }, '*');
             });
           });
+
+          // Reinitialize the button after new widget is ready
+          widget.headerReady().then(() => {
+            const newButton = widget.createButton();
+            newButton.style.cursor = 'pointer';
+            button = newButton;
+            updateButtonState();
+            // Reattach click handler
+            newButton.addEventListener("click", arguments.callee);
+          });
         });
+      });
+    }
+
+    function normalizeTokenMetadata(tokenData, account_id) {
+      const metadata = tokenData?.metadata ?? tokenData ?? {};
+      return {
+        name: metadata.name ?? account_id,
+        symbol: metadata.symbol ?? account_id,
+        decimals: Number(metadata.decimals ?? 24),
+        icon: metadata.icon?.startsWith("data:") ? metadata.icon : null,
+        reference: metadata.reference ?? null,
+        reference_hash: metadata.reference_hash ?? null,
+      };
+    }
+
+    async function getMetadata(account_id, tokenDataFromSearch = null) {
+      console.log(`Getting ${account_id}`);
+      if (account_id === "wrap.near") {
+        return {
+          name: "NEAR",
+          symbol: "NEAR",
+          decimals: 24,
+          icon: 'data:image/svg+xml,<svg viewBox="0 0 1080 1080" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="1080" height="1080" fill="%2300EC97"/><path d="M773.425 243.38C751.453 243.38 731.054 254.772 719.544 273.499L595.538 457.606C591.499 463.673 593.138 471.854 599.206 475.893C604.124 479.172 610.631 478.766 615.11 474.913L737.172 369.042C739.2 367.217 742.327 367.403 744.152 369.431C744.98 370.361 745.42 371.561 745.42 372.794V704.265C745.42 707.003 743.206 709.2 740.468 709.2C738.997 709.2 737.611 708.558 736.682 707.425L367.707 265.758C355.69 251.577 338.045 243.397 319.47 243.38H306.575C271.673 243.38 243.38 271.673 243.38 306.575V773.425C243.38 808.327 271.673 836.62 306.575 836.62C328.546 836.62 348.946 825.228 360.456 806.501L484.462 622.394C488.501 616.327 486.862 608.146 480.794 604.107C475.876 600.828 469.369 601.234 464.89 605.087L342.828 710.958C340.8 712.783 337.673 712.597 335.848 710.569C335.02 709.639 334.58 708.439 334.597 707.206V375.651C334.597 372.913 336.811 370.715 339.549 370.715C341.003 370.715 342.406 371.358 343.335 372.49L712.259 814.242C724.276 828.423 741.921 836.603 760.496 836.62H773.392C808.293 836.637 836.603 808.361 836.637 773.459V306.575C836.637 271.673 808.344 243.38 773.442 243.38H773.425Z" fill="black"/></svg>',
+          spec: "ft-1.0.0",
+          reference: null,
+          reference_hash: null,
+        };
       }
-      
-      async function getMetadata(account_id) {
-        console.log(`Getting ${account_id}`);
-        if (account_id === "wrap.near") {
-          return {
-            name: "NEAR",
-            symbol: "NEAR",
-            decimals: 24,
-            icon: "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTA4MCIgaGVpZ2h0PSIxMDgwIiB2aWV3Qm94PSIwIDAgMTA4MCAxMDgwIiBmaWxsPSJub25lIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgo8cmVjdCB3aWR0aD0iMTA4MCIgaGVpZ2h0PSIxMDgwIiBmaWxsPSIjMDBFQzk3Ii8+CjxwYXRoIGQ9Ik03NzMuNDI1IDI0My4zOEM3NTEuNDUzIDI0My4zOCA3MzEuMDU0IDI1NC43NzIgNzE5LjU0NCAyNzMuNDk5TDU5NS41MzggNDU3LjYwNkM1OTEuNDk5IDQ2My42NzMgNTkzLjEzOCA0NzEuODU0IDU5OS4yMDYgNDc1Ljg5M0M2MDQuMTI0IDQ3OS4xNzIgNjEwLjYzMSA0NzguNzY2IDYxNS4xMSA0NzQuOTEzTDczNy4xNzIgMzY5LjA0MkM3MzkuMiAzNjcuMjE3IDc0Mi4zMjcgMzY3LjQwMyA3NDQuMTUyIDM2OS40MzFDNzQ0Ljk4IDM3MC4zNjEgNzQ1LjQyIDM3MS41NjEgNzQ1LjQyIDM3Mi43OTRWNzA0LjI2NUM3NDUuNDIgNzA3LjAwMyA3NDMuMjA2IDcwOS4yIDc0MC40NjggNzA5LjJDNzM4Ljk5NyA3MDkuMiA3MzcuNjExIDcwOC41NTggNzM2LjY4MiA3MDcuNDI1TDM2Ny43MDcgMjY1Ljc1OEMzNTUuNjkgMjUxLjU3NyAzMzguMDQ1IDI0My4zOTcgMzE5LjQ3IDI0My4zOEgzMDYuNTc1QzI3MS42NzMgMjQzLjM4IDI0My4zOCAyNzEuNjczIDI0My4zOCAzMDYuNTc1Vjc3My40MjVDMjQzLjM4IDgwOC4zMjcgMjcxLjY3MyA4MzYuNjIgMzA2LjU3NSA4MzYuNjJDMzI4LjU0NiA4MzYuNjIgMzQ4Ljk0NiA4MjUuMjI4IDM2MC40NTYgODA2LjUwMUw0ODQuNDYyIDYyMi4zOTRDNDg4LjUwMSA2MTYuMzI3IDQ4Ni44NjIgNjA4LjE0NiA0ODAuNzk0IDYwNC4xMDdDNDc1Ljg3NiA2MDAuODI4IDQ2OS4zNjkgNjAxLjIzNCA0NjQuODkgNjA1LjA4N0wzNDIuODI4IDcxMC45NThDMzQwLjggNzEyLjc4MyAzMzcuNjczIDcxMi41OTcgMzM1Ljg0OCA3MTAuNTY5QzMzNS4wMiA3MDkuNjM5IDMzNC41OCA3MDguNDM5IDMzNC41OTcgNzA3LjIwNlYzNzUuNjUxQzMzNC41OTcgMzcyLjkxMyAzMzYuODExIDM3MC43MTUgMzM5LjU0OSAzNzAuNzE1QzM0MS4wMDMgMzcwLjcxNSAzNDIuNDA2IDM3MS4zNTggMzQzLjMzNSAzNzIuNDlMNzEyLjI1OSA4MTQuMjQyQzcyNC4yNzYgODI4LjQyMyA3NDEuOTIxIDgzNi42MDMgNzYwLjQ5NiA4MzYuNjJINzczLjM5MkM4MDguMjkzIDgzNi42MzcgODM2LjYwMyA4MDguMzYxIDgzNi42MzcgNzczLjQ1OVYzMDYuNTc1QzgzNi42MzcgMjcxLjY3MyA4MDguMzQ0IDI0My4zOCA3NzMuNDQyIDI0My4zOEg3NzMuNDI1WiIgZmlsbD0iYmxhY2siLz4KPC9zdmc+Cg==",
-            spec: "ft-1.0.0",
-            reference: null,
-            reference_hash: null,
-          }
-        }
-        const tokens = JSON.parse(localStorage.getItem("tokenMeta")) ?? {};
-        if (tokens[account_id]) {
-          return tokens[account_id];
-        }
-        tokens[account_id] = await fetch(rpcUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            id: "dontcare",
-            jsonrpc: "2.0",
-            method: "query",
-            params: {
-              request_type: "call_function",
-              account_id: account_id,
-              method_name: "ft_metadata",
-              args_base64: btoa(JSON.stringify({})),
-              finality: "final"
-            }
-          })
-        })
-          .then((data) => data.json())
-          .then((data) =>
-            new TextDecoder().decode(Uint8Array.from(data.result.result))
-          )
-          .then((data) => JSON.parse(data));
-        localStorage.setItem("tokenMeta", JSON.stringify(tokens));
-        return tokens[account_id];
+
+      const tokenId = account_id.toLowerCase();
+      if (tokenDataFromSearch) {
+        return normalizeTokenMetadata(tokenDataFromSearch, tokenId);
       }
-      
-      window.addEventListener("DOMContentLoaded", initOnReady, false);
-    </script>
-	</head>
-	<body style="margin: 0px;">
-		<div id="tv_chart_container"></div>
-	</body>
+
+      const tokenData = await fetch(
+        `${pricesUrl}/token?token_id=${encodeURIComponent(tokenId)}`
+      ).then((data) => data.json());
+
+      return normalizeTokenMetadata(tokenData, tokenId);
+    }
+
+    window.addEventListener("DOMContentLoaded", initOnReady, false);
+  </script>
+</head>
+
+<body style="margin: 0px;">
+  <div id="tv_chart_container"></div>
+</body>
+
 </html>
