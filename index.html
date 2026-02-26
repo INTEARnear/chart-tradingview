@@ -15,7 +15,6 @@
       const params = new URLSearchParams(window.location.search);
       const isDark = params.get("theme") ? (params.get("theme") !== "light") : window.matchMedia("(prefers-color-scheme: dark)").matches;
       const theme = isDark ? "dark" : "light";
-      console.log("theme", theme);
       const symbol = params.get("token") ?? (isTestnet ? "wrap.testnet" : "wrap.near");
       const searchEnabled = params.get("search") !== "false";
       const disabledFeatures = searchEnabled
@@ -119,6 +118,10 @@
         };
       }
 
+      function streamKey(tokenId, resolution) {
+        return `${tokenId}/${resolution}`;
+      }
+
       const datafeed = {
         onReady: (callback) => {
           console.log("Loading TradingView");
@@ -211,18 +214,20 @@
           onErrorCallback
         ) => {
           console.log(`Getting bars for ${symbolInfo.name} ${resolution} ${periodParams.countBack} ${periodParams.to * 1000}`);
+          const tokenId = symbolInfo.full_name.toLowerCase();
+          const key = streamKey(tokenId, resolution);
 
           // Fetch token data for circulating supply
           const tokenData = await fetch(
-            `${pricesUrl}/token?token_id=${symbolInfo.full_name.toLowerCase()}`
+            `${pricesUrl}/token?token_id=${tokenId}`
           ).then((data) => data.json());
 
-          const url = `${eventsUrl}/v3/price_token/ohlc?token=${symbolInfo.full_name.toLowerCase()
+          const url = `${eventsUrl}/v3/price_token/ohlc?token=${tokenId
             }&resolution=${resolution}&count_back=${periodParams.countBack}&to=${periodParams.to * 1000
             }`;
           const response = await fetch(url).then((data) => data.json());
           const noData = response.length < periodParams.countBack;
-          const decimals = (await getMetadata(symbolInfo.full_name.toLowerCase())).decimals;
+          const decimals = (await getMetadata(tokenId)).decimals;
           const isMCap = localStorage.getItem('chartMode') === 'mcap';
           const circulatingSupply = parseFloat(tokenData.circulating_supply) / (10 ** decimals);
           const multiplier = isMCap ? circulatingSupply : 1;
@@ -235,8 +240,14 @@
             bar.volume = parseFloat(bar.volume);
             bar.time = bar.timestamp_millis;
             return bar;
-          });
-          latestBars[symbolInfo.full_name + "/" + resolution] = bars[bars.length - 1];
+          }).sort((a, b) => a.time - b.time);
+          if (bars.length > 0) {
+            const latestFromHistory = bars[bars.length - 1];
+            const currentLatest = latestBars[key];
+            if (!currentLatest || latestFromHistory.time > currentLatest.time) {
+              latestBars[key] = latestFromHistory;
+            }
+          }
           onHistoryCallback(bars, { noData });
         },
         subscribeBars: async (
@@ -248,7 +259,7 @@
         ) => {
           console.log(`Subscribing to bars of ${symbolInfo.full_name} @ ${resolution}`);
           const tokenId = symbolInfo.full_name.toLowerCase();
-          const streamKey = symbolInfo.full_name + "/" + resolution;
+          const key = streamKey(tokenId, resolution);
           const decimals = (await getMetadata(tokenId)).decimals;
 
           // Fetch token data for circulating supply
@@ -303,9 +314,9 @@
               const multiplier = isMCap ? circulatingSupply : 1;
               const tradePrice = rawPrice * 10 ** (decimals - USDT_DECIMALS) * multiplier;
               const eventBarTime = alignTimeToResolution(time, resolution);
-              const latestBar = latestBars[streamKey];
+              const latestBar = latestBars[key];
               if (!latestBar || !Number.isFinite(latestBar.time)) {
-                console.log("Missing latest bar for stream:", streamKey);
+                console.log("Missing latest bar for stream:", key);
                 continue;
               }
 
@@ -322,7 +333,7 @@
                   low: Math.min(latestBar.low, tradePrice),
                   close: tradePrice
                 };
-                latestBars[streamKey] = updatedBar;
+                latestBars[key] = updatedBar;
                 onTick(updatedBar);
                 continue;
               }
@@ -333,7 +344,7 @@
 
               while (nextTime < eventBarTime) {
                 const emptyBar = createFlatBar(nextTime, carryPrice);
-                latestBars[streamKey] = emptyBar;
+                latestBars[key] = emptyBar;
                 onTick(emptyBar);
                 nextTime += intervalMs;
               }
@@ -347,7 +358,7 @@
                 volume: 0
               };
 
-              latestBars[streamKey] = nextTradeBar;
+              latestBars[key] = nextTradeBar;
               onTick(nextTradeBar);
             }
           };
