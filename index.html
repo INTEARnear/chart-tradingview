@@ -240,6 +240,11 @@
             bar.time = bar.timestamp_millis;
             return bar;
           }).sort((a, b) => a.time - b.time);
+          for (let i = 1; i < bars.length; i++) {
+            bars[i].open = bars[i - 1].close;
+            bars[i].high = Math.max(bars[i].high, bars[i].open);
+            bars[i].low = Math.min(bars[i].low, bars[i].open);
+          }
           if (bars.length > 0) {
             const latestFromHistory = bars[bars.length - 1];
             const currentLatest = latestBars[key];
