@@ -7,15 +7,14 @@
   <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
   <script type="text/javascript" src="https://dynamic-moxie-09a484.netlify.app/charting_library.standalone.js"></script>
   <script>
-    const isTestnet = window.location.hostname.includes('testnet');
-    const pricesUrl = isTestnet ? 'https://prices-testnet.intear.tech' : 'https://prices.intear.tech';
-    const eventsUrl = isTestnet ? 'https://events-v3-testnet.intear.tech' : 'https://events-v3.intear.tech';
-    const wsEventsUrl = isTestnet ? 'wss://ws-events-v3-testnet.intear.tech' : 'wss://ws-events-v3.intear.tech';
+    const pricesUrl = 'https://price-indexer-v2.intea.rs';
+    const eventsUrl = 'https://price-indexer-v2.intea.rs';
+    const wsEventsUrl = 'wss://ws-events-v3.intear.tech';
     function initOnReady() {
       const params = new URLSearchParams(window.location.search);
       const isDark = params.get("theme") ? (params.get("theme") !== "light") : window.matchMedia("(prefers-color-scheme: dark)").matches;
       const theme = isDark ? "dark" : "light";
-      const symbol = params.get("token") ?? (isTestnet ? "wrap.testnet" : "wrap.near");
+      const symbol = params.get("token") ?? "wrap.near";
       const searchEnabled = params.get("search") !== "false";
       const disabledFeatures = searchEnabled
         ? ["use_localstorage_for_settings"]
@@ -222,7 +221,7 @@
             `${pricesUrl}/token?token_id=${tokenId}`
           ).then((data) => data.json());
 
-          const url = `${eventsUrl}/v3/price_token/ohlc?token=${tokenId
+          const url = `${eventsUrl}/ohlc?token=${tokenId
             }&resolution=${resolution}&count_back=${periodParams.countBack}&to=${periodParams.to * 1000
             }`;
           const response = await fetch(url).then((data) => data.json());
@@ -233,10 +232,10 @@
           const multiplier = isMCap ? circulatingSupply : 1;
 
           const bars = response.map((bar) => {
-            bar.open = parseFloat(bar.open) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
-            bar.close = parseFloat(bar.close) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
-            bar.high = parseFloat(bar.high) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
-            bar.low = parseFloat(bar.low) * 10 ** (decimals - USDT_DECIMALS) * multiplier;
+            bar.open = parseFloat(bar.open) * multiplier;
+            bar.close = parseFloat(bar.close) * multiplier;
+            bar.high = parseFloat(bar.high) * multiplier;
+            bar.low = parseFloat(bar.low) * multiplier;
             bar.volume = parseFloat(bar.volume);
             bar.time = bar.timestamp_millis;
             return bar;
