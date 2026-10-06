@@ -7,9 +7,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
   <script type="text/javascript" src="https://dynamic-moxie-09a484.netlify.app/charting_library.standalone.js"></script>
   <script>
-    const pricesUrl = 'https://price-indexer-v2.intea.rs';
-    const eventsUrl = 'https://price-indexer-v2.intea.rs';
-    const wsEventsUrl = 'wss://ws-events-v3.intear.tech';
+    const pricesUrl = 'https://prices.intear.tech';
+    const wsPricesUrl = 'wss://prices.intear.tech';
     function initOnReady() {
       const params = new URLSearchParams(window.location.search);
       const isDark = params.get("theme") ? (params.get("theme") !== "light") : window.matchMedia("(prefers-color-scheme: dark)").matches;
@@ -53,7 +52,6 @@
         }[new Date().getTimezoneOffset().toString()] ?? "Etc/UTC"; // TODO doesn't work
       const latestBars = {};
       const subscribers = {};
-      const USDT_DECIMALS = 6;
 
       function resolutionToMs(resolution) {
         switch (resolution) {
@@ -100,10 +98,6 @@
 
         const intervalMs = resolutionToMs(resolution);
         return Math.floor(timestampMs / intervalMs) * intervalMs;
-      }
-
-      function toUnixMilliseconds(timestampNanosec) {
-        return Number(BigInt(timestampNanosec) / 1_000_000n);
       }
 
       function createFlatBar(time, price) {
@@ -221,7 +215,7 @@
             `${pricesUrl}/token?token_id=${tokenId}`
           ).then((data) => data.json());
 
-          const url = `${eventsUrl}/ohlc?token=${tokenId
+          const url = `${pricesUrl}/ohlc?token=${tokenId
             }&resolution=${resolution}&count_back=${periodParams.countBack}&to=${periodParams.to * 1000
             }`;
           const response = await fetch(url).then((data) => data.json());
@@ -272,99 +266,63 @@
           ).then((data) => data.json());
 
           const circulatingSupply = parseFloat(tokenData.circulating_supply) / (10 ** decimals);
-          const ws = new WebSocket(`${wsEventsUrl}/events/price_token`);
+          const ws = new WebSocket(`${wsPricesUrl}/prices/ws/${encodeURIComponent(tokenId)}`);
           subscribers[listenerGuid] = { ws, circulatingSupply };
 
-          ws.onopen = () => {
-            ws.send(JSON.stringify({ "And": [{ "path": "token", "operator": { "Equals": tokenId } }] }));
-          };
-
           ws.onmessage = (e) => {
-            let payload;
-            try {
-              payload = JSON.parse(e.data);
-            } catch (error) {
-              console.log("Malformed websocket payload (JSON parse failed):", error);
+            const data = JSON.parse(e.data);
+            const time = data.timestamp_millis;
+            const rawPrice = data.price_usd;
+            const isMCap = localStorage.getItem('chartMode') === 'mcap';
+            const multiplier = isMCap ? circulatingSupply : 1;
+            const tradePrice = rawPrice * multiplier;
+            const eventBarTime = alignTimeToResolution(time, resolution);
+            const latestBar = latestBars[key];
+            if (!latestBar) {
+              console.log("Missing latest bar for stream:", key);
               return;
             }
 
-            if (!Array.isArray(payload)) {
-              console.log("Malformed websocket payload (expected array):", payload);
+            const latestBarTime = latestBar.time;
+            if (eventBarTime < latestBarTime) {
+              console.log("Out-of-order price event ignored:", data);
               return;
             }
 
-            const events = payload;
-            for (const data of events) {
-              if (data.token !== tokenId) {
-                continue;
-              }
-
-              let time;
-              let rawPrice;
-              try {
-                time = toUnixMilliseconds(data.timestamp_nanosec);
-                rawPrice = Number(data.price_usd);
-              } catch (error) {
-                console.log("Malformed price_token event:", data, error);
-                continue;
-              }
-
-              if (!Number.isFinite(time) || !Number.isFinite(rawPrice)) {
-                console.log("Malformed price_token numeric fields:", data);
-                continue;
-              }
-
-              const isMCap = localStorage.getItem('chartMode') === 'mcap';
-              const multiplier = isMCap ? circulatingSupply : 1;
-              const tradePrice = rawPrice * 10 ** (decimals - USDT_DECIMALS) * multiplier;
-              const eventBarTime = alignTimeToResolution(time, resolution);
-              const latestBar = latestBars[key];
-              if (!latestBar || !Number.isFinite(latestBar.time)) {
-                console.log("Missing latest bar for stream:", key);
-                continue;
-              }
-
-              const latestBarTime = latestBar.time;
-              if (eventBarTime < latestBarTime) {
-                console.log("Out-of-order price_token event ignored:", data);
-                continue;
-              }
-
-              if (eventBarTime === latestBarTime) {
-                const updatedBar = {
-                  ...latestBar,
-                  high: Math.max(latestBar.high, tradePrice),
-                  low: Math.min(latestBar.low, tradePrice),
-                  close: tradePrice
-                };
-                latestBars[key] = updatedBar;
-                onTick(updatedBar);
-                continue;
-              }
-
-              let carryPrice = latestBar.close;
-              const intervalMs = resolutionToMs(resolution);
-              let nextTime = latestBarTime + intervalMs;
-
-              while (nextTime < eventBarTime) {
-                const emptyBar = createFlatBar(nextTime, carryPrice);
-                latestBars[key] = emptyBar;
-                onTick(emptyBar);
-                nextTime += intervalMs;
-              }
-
-              const nextTradeBar = {
-                time: eventBarTime,
-                open: carryPrice,
-                high: Math.max(carryPrice, tradePrice),
-                low: Math.min(carryPrice, tradePrice),
-                close: tradePrice,
-                volume: 0
+            if (eventBarTime === latestBarTime) {
+              const updatedBar = {
+                ...latestBar,
+                high: Math.max(latestBar.high, tradePrice),
+                low: Math.min(latestBar.low, tradePrice),
+                close: tradePrice
               };
-
-              latestBars[key] = nextTradeBar;
-              onTick(nextTradeBar);
+              latestBars[key] = updatedBar;
+              onTick(updatedBar);
+              return;
             }
+
+            let carryPrice = latestBar.close;
+            const intervalMs = resolutionToMs(resolution);
+            let nextTime = latestBarTime + intervalMs;
+
+            while (nextTime < eventBarTime) {
+              const emptyBar = createFlatBar(nextTime, carryPrice);
+              latestBars[key] = emptyBar;
+              onTick(emptyBar);
+              nextTime += intervalMs;
+            }
+
+            const nextTradeBar = {
+              time: eventBarTime,
+              open: carryPrice,
+              high: Math.max(carryPrice, tradePrice),
+              low: Math.min(carryPrice, tradePrice),
+              close: tradePrice,
+              volume: 0
+            };
+
+            latestBars[key] = nextTradeBar;
+            onTick(nextTradeBar);
           };
 
           ws.onerror = (error) => {
