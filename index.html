@@ -7,18 +7,22 @@
   <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
   <script type="text/javascript" src="https://dynamic-moxie-09a484.netlify.app/charting_library.standalone.js"></script>
   <script>
-    const pricesUrl = 'https://prices.intear.tech';
-    const wsPricesUrl = 'wss://prices.intear.tech';
+    // Intear API, see https://docs.intear.tech/api/
+    const apiUrl = 'https://api.intea.rs';
+    const wsApiUrl = 'wss://api.intea.rs/ws';
+    const resolutions = ["1", "5", "15", "60", "240", "D", "W"];
+
     function initOnReady() {
       const params = new URLSearchParams(window.location.search);
       const isDark = params.get("theme") ? (params.get("theme") !== "light") : window.matchMedia("(prefers-color-scheme: dark)").matches;
       const theme = isDark ? "dark" : "light";
       const symbol = params.get("token") ?? "wrap.near";
+      // `4h` and `<n>m` were accepted before, keep links with them working
+      const interval = (params.get("interval") ?? "1").replace(/m$/, "").replace(/^4h$/, "240");
       const searchEnabled = params.get("search") !== "false";
       const disabledFeatures = searchEnabled
         ? ["use_localstorage_for_settings"]
         : ["use_localstorage_for_settings", "header_symbol_search"];
-      const subscriptions = {};
       const timezone =
         {
           "-780": "Pacific/Fakaofo",
@@ -50,69 +54,62 @@
           "540": "America/Anchorage",
           "600": "Pacific/Honolulu"
         }[new Date().getTimezoneOffset().toString()] ?? "Etc/UTC"; // TODO doesn't work
-      const latestBars = {};
-      const subscribers = {};
 
-      function resolutionToMs(resolution) {
-        switch (resolution) {
-          case "1":
-            return 60 * 1000;
-          case "5":
-            return 5 * 60 * 1000;
-          case "15":
-            return 15 * 60 * 1000;
-          case "60":
-            return 60 * 60 * 1000;
-          case "4h":
-            return 4 * 60 * 60 * 1000;
-          case "D":
-            return 24 * 60 * 60 * 1000;
-          case "W":
-            return 7 * 24 * 60 * 60 * 1000;
-          default:
-            throw new Error(`Unexpected resolution ${resolution}`);
-        }
+      const isMCap = () => localStorage.getItem('chartMode') === 'mcap';
+      // Circulating supply of each token, in whole tokens, for MCap mode
+      const supplies = {};
+      const multiplier = (tokenId) => (isMCap() ? supplies[tokenId] : 1);
+
+      // Turns a token's candle columns into TradingView bars
+      function toBars({ time, usd }, multiplier) {
+        return time.map((openedAt, i) => ({
+          time: openedAt,
+          open: usd.open[i] * multiplier,
+          high: usd.high[i] * multiplier,
+          low: usd.low[i] * multiplier,
+          close: usd.close[i] * multiplier,
+          volume: usd.volume[i],
+        }));
       }
 
-      function alignTimeToResolution(timestampMs, resolution) {
-        if (resolution === "D") {
-          const date = new Date(timestampMs);
-          return Date.UTC(
-            date.getUTCFullYear(),
-            date.getUTCMonth(),
-            date.getUTCDate()
-          );
-        }
+      // The newest bar TradingView has of each token and resolution. It can only update its newest
+      // bar, and a push can also carry the candle before it
+      const newestBarTimes = new Map();
 
-        if (resolution === "W") {
-          const date = new Date(timestampMs);
-          const dayOfWeek = date.getUTCDay();
-          const daysSinceMonday = (dayOfWeek + 6) % 7;
-          const startOfDayUtc = Date.UTC(
-            date.getUTCFullYear(),
-            date.getUTCMonth(),
-            date.getUTCDate()
-          );
-          return startOfDayUtc - daysSinceMonday * 24 * 60 * 60 * 1000;
-        }
+      // Live candles: every chart shares one connection, with a subscription per chart
+      const streams = new Map(); // by subscription id
+      const streamIds = new Map(); // subscription id of each TradingView listenerGuid
+      let nextId = 1;
+      let socket = connect();
 
-        const intervalMs = resolutionToMs(resolution);
-        return Math.floor(timestampMs / intervalMs) * intervalMs;
+      function send(method, params, id = nextId++) {
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id, method, params }));
       }
 
-      function createFlatBar(time, price) {
-        return {
-          time,
-          open: price,
-          high: price,
-          low: price,
-          close: price,
-          volume: 0
-        };
-      }
-
-      function streamKey(tokenId, resolution) {
-        return `${tokenId}/${resolution}`;
+      function connect() {
+        const ws = new WebSocket(wsApiUrl);
+        ws.addEventListener('open', () => {
+          for (const [id, stream] of streams) send('candles.subscribe', stream.params, id);
+        });
+        ws.addEventListener('message', (event) => {
+          const message = JSON.parse(event.data);
+          if (message.error) console.error(`Request ${message.id} failed: ${message.error.message}`);
+          const stream = streams.get(message.sub);
+          if (!stream || !message.tokens) return;
+          for (const [tokenId, candles] of Object.entries(message.tokens)) {
+            for (const bar of toBars(candles, multiplier(tokenId))) {
+              if (bar.time < (newestBarTimes.get(stream.key) ?? 0)) continue;
+              newestBarTimes.set(stream.key, bar.time);
+              stream.onTick(bar);
+            }
+          }
+        });
+        ws.addEventListener('close', () => {
+          // Candles may have changed while disconnected, so TradingView fetches them again
+          for (const stream of streams.values()) stream.onReset();
+          setTimeout(() => (socket = connect()), 1000);
+        });
+        return ws;
       }
 
       const datafeed = {
@@ -125,7 +122,7 @@
               supports_marks: true,
               supports_timescale_marks: true,
               supports_time: true,
-              supported_resolutions: ["1", "5", "15", "60", "4h", "D", "W"]
+              supported_resolutions: resolutions
             })
           );
         },
@@ -141,25 +138,21 @@
           }
 
           console.log(`Searching ${userInput}`);
-          const results = await fetch(
-            `${pricesUrl}/token-search?q=${encodeURIComponent(
-              userInput
-            )}&n=20`
-          ).then((res) => res.json());
-          const symbols = results.map(async (result) => {
-            const metadata = await getMetadata(result.account_id, result);
-            const icon = metadata.icon;
-            return {
-              description: metadata.name,
-              exchange,
-              symbol: metadata.symbol,
-              ticker: result.account_id,
-              timezone,
-              logo_urls: icon ? [icon] : []
-            };
-          });
-          const readySymbols = await Promise.all(symbols);
-          onResultReadyCallback(readySymbols);
+          const search = new URLSearchParams({ q: userInput, fields: "name,symbol,icon_hash", limit: "20" });
+          const result = await fetchApi(`/tokens/search?${search}`);
+          onResultReadyCallback(
+            rows(result).map((token) => {
+              const metadata = withNearMetadata(token);
+              return {
+                description: metadata.name,
+                exchange,
+                symbol: metadata.symbol,
+                ticker: token.account_id,
+                timezone,
+                logo_urls: metadata.icon ? [metadata.icon] : []
+              };
+            })
+          );
         },
         resolveSymbol: async (
           symbolName,
@@ -168,19 +161,23 @@
           extension
         ) => {
           console.log(`Loading ${symbolName}`);
-          const metadata = await getMetadata(symbolName);
-          const price = await fetch(
-            `${pricesUrl}/price?token_id=${symbolName}`
-          ).then((data) => data.json());
-          const isMCap = localStorage.getItem('chartMode') === 'mcap';
+          const tokenId = symbolName.toLowerCase();
+          const token = await getToken(tokenId);
+          if (!token) {
+            onResolveErrorCallback(`Unknown token ${tokenId}`);
+            return;
+          }
+          supplies[tokenId] = parseFloat(token.circulating_supply_with_decimals);
+          const price = parseFloat(token.price_usd);
+          const metadata = withNearMetadata(token);
           // Adjust digits based on mode
-          const baseDigits = Math.ceil(Math.max(0, -Math.log10(price))) + 3;
+          const baseDigits = price > 0 ? Math.ceil(Math.max(0, -Math.log10(price))) + 3 : 3;
           // In MCap mode, show fewer decimal places
-          const digits = isMCap ? Math.max(baseDigits - 7, 0) : baseDigits;
+          const digits = isMCap() ? Math.max(baseDigits - 7, 0) : baseDigits;
           onSymbolResolvedCallback({
-            ticker: symbolName,
+            ticker: tokenId,
             name: metadata.name,
-            description: `${metadata.symbol}/${isMCap ? 'MCap' : 'USD'}`,
+            description: `${metadata.symbol}/${isMCap() ? 'MCap' : 'USD'}`,
             type: "crypto",
             session: "24x7",
             timezone,
@@ -188,11 +185,12 @@
             minmov: 1,
             pricescale: 10 ** digits,
             has_intraday: true,
-            intraday_multipliers: ["1", "60"],
+            intraday_multipliers: ["1", "5", "15", "60", "240"],
             has_daily: true,
             daily_multipliers: ["1"],
+            has_weekly_and_monthly: true,
+            weekly_multipliers: ["1"],
             has_empty_bars: true,
-            has_weekly_and_monthly: false,
             visible_plots_set: "ohlcv",
             volume_precision: 2,
             data_status: "streaming",
@@ -206,291 +204,139 @@
           onHistoryCallback,
           onErrorCallback
         ) => {
-          console.log(`Getting bars for ${symbolInfo.name} ${resolution} ${periodParams.countBack} ${periodParams.to * 1000}`);
-          const tokenId = symbolInfo.full_name.toLowerCase();
-          const key = streamKey(tokenId, resolution);
-
-          // Fetch token data for circulating supply
-          const tokenData = await fetch(
-            `${pricesUrl}/token?token_id=${tokenId}`
-          ).then((data) => data.json());
-
-          const url = `${pricesUrl}/ohlc?token=${tokenId
-            }&resolution=${resolution}&count_back=${periodParams.countBack}&to=${periodParams.to * 1000
-            }`;
-          const response = await fetch(url).then((data) => data.json());
-          const noData = response.length < periodParams.countBack;
-          const decimals = (await getMetadata(tokenId)).decimals;
-          const isMCap = localStorage.getItem('chartMode') === 'mcap';
-          const circulatingSupply = parseFloat(tokenData.circulating_supply) / (10 ** decimals);
-          const multiplier = isMCap ? circulatingSupply : 1;
-
-          const bars = response.map((bar) => {
-            bar.open = parseFloat(bar.open) * multiplier;
-            bar.close = parseFloat(bar.close) * multiplier;
-            bar.high = parseFloat(bar.high) * multiplier;
-            bar.low = parseFloat(bar.low) * multiplier;
-            bar.volume = parseFloat(bar.volume);
-            bar.time = bar.timestamp_millis;
-            return bar;
-          }).sort((a, b) => a.time - b.time);
-          for (let i = 1; i < bars.length; i++) {
-            bars[i].open = bars[i - 1].close;
-            bars[i].high = Math.max(bars[i].high, bars[i].open);
-            bars[i].low = Math.min(bars[i].low, bars[i].open);
+          console.log(`Getting bars for ${symbolInfo.ticker} ${resolution} ${periodParams.countBack} ${periodParams.to * 1000}`);
+          const countBack = Math.min(periodParams.countBack, 5000);
+          const candleParams = new URLSearchParams({
+            tokens: symbolInfo.ticker,
+            resolution,
+            count_back: String(countBack),
+            to_millis: String(periodParams.to * 1000 - 1), // TradingView's `to` is exclusive
+          });
+          try {
+            const result = await fetchApi(`/candles?${candleParams}`);
+            const candles = result.tokens[symbolInfo.ticker]; // not there if the token doesn't exist
+            const bars = candles ? toBars(candles, multiplier(symbolInfo.ticker)) : [];
+            const key = `${symbolInfo.ticker}/${resolution}`;
+            if (bars.length > 0) newestBarTimes.set(key, Math.max(newestBarTimes.get(key) ?? 0, bars[bars.length - 1].time));
+            onHistoryCallback(bars, { noData: bars.length < countBack });
+          } catch (error) {
+            onErrorCallback(String(error));
           }
-          if (bars.length > 0) {
-            const latestFromHistory = bars[bars.length - 1];
-            const currentLatest = latestBars[key];
-            if (!currentLatest || latestFromHistory.time > currentLatest.time) {
-              latestBars[key] = latestFromHistory;
-            }
-          }
-          onHistoryCallback(bars, { noData });
         },
-        subscribeBars: async (
+        subscribeBars: (
           symbolInfo,
           resolution,
           onTick,
           listenerGuid,
           onResetCacheNeededCallback
         ) => {
-          console.log(`Subscribing to bars of ${symbolInfo.full_name} @ ${resolution}`);
-          const tokenId = symbolInfo.full_name.toLowerCase();
-          const key = streamKey(tokenId, resolution);
-          const decimals = (await getMetadata(tokenId)).decimals;
-
-          // Fetch token data for circulating supply
-          const tokenData = await fetch(
-            `${pricesUrl}/token?token_id=${tokenId}`
-          ).then((data) => data.json());
-
-          const circulatingSupply = parseFloat(tokenData.circulating_supply) / (10 ** decimals);
-          const ws = new WebSocket(`${wsPricesUrl}/prices/ws/${encodeURIComponent(tokenId)}`);
-          subscribers[listenerGuid] = { ws, circulatingSupply };
-
-          ws.onmessage = (e) => {
-            const data = JSON.parse(e.data);
-            const time = data.timestamp_millis;
-            const rawPrice = data.price_usd;
-            const isMCap = localStorage.getItem('chartMode') === 'mcap';
-            const multiplier = isMCap ? circulatingSupply : 1;
-            const tradePrice = rawPrice * multiplier;
-            const eventBarTime = alignTimeToResolution(time, resolution);
-            const latestBar = latestBars[key];
-            if (!latestBar) {
-              console.log("Missing latest bar for stream:", key);
-              return;
-            }
-
-            const latestBarTime = latestBar.time;
-            if (eventBarTime < latestBarTime) {
-              console.log("Out-of-order price event ignored:", data);
-              return;
-            }
-
-            if (eventBarTime === latestBarTime) {
-              const updatedBar = {
-                ...latestBar,
-                high: Math.max(latestBar.high, tradePrice),
-                low: Math.min(latestBar.low, tradePrice),
-                close: tradePrice
-              };
-              latestBars[key] = updatedBar;
-              onTick(updatedBar);
-              return;
-            }
-
-            let carryPrice = latestBar.close;
-            const intervalMs = resolutionToMs(resolution);
-            let nextTime = latestBarTime + intervalMs;
-
-            while (nextTime < eventBarTime) {
-              const emptyBar = createFlatBar(nextTime, carryPrice);
-              latestBars[key] = emptyBar;
-              onTick(emptyBar);
-              nextTime += intervalMs;
-            }
-
-            const nextTradeBar = {
-              time: eventBarTime,
-              open: carryPrice,
-              high: Math.max(carryPrice, tradePrice),
-              low: Math.min(carryPrice, tradePrice),
-              close: tradePrice,
-              volume: 0
-            };
-
-            latestBars[key] = nextTradeBar;
-            onTick(nextTradeBar);
-          };
-
-          ws.onerror = (error) => {
-            console.error(`WebSocket error for ${tokenId} @ ${resolution}:`, error);
-          };
-
-          ws.onclose = () => {
-            if (subscribers[listenerGuid]?.ws === ws) {
-              delete subscribers[listenerGuid];
-            }
-          };
+          console.log(`Subscribing to bars of ${symbolInfo.ticker} @ ${resolution}`);
+          const id = nextId++;
+          const params = { tokens: [symbolInfo.ticker], resolution, series: ["open", "high", "low", "close", "volume"] };
+          streams.set(id, { key: `${symbolInfo.ticker}/${resolution}`, params, onTick, onReset: onResetCacheNeededCallback });
+          streamIds.set(listenerGuid, id);
+          send('candles.subscribe', params, id);
         },
-        unsubscribeBars: async (listenerGuid) => {
+        unsubscribeBars: (listenerGuid) => {
           console.log(`Unsubscribing from bars: ${listenerGuid}`);
-          if (subscribers[listenerGuid] && subscribers[listenerGuid].ws) {
-            subscribers[listenerGuid].ws.close();
-          }
+          const id = streamIds.get(listenerGuid);
+          if (id === undefined) return;
+          streamIds.delete(listenerGuid);
+          streams.delete(id);
+          send('unsubscribe', { sub: id });
         }
       };
-      var widget = (window.tvWidget = new TradingView.widget({
-        library_path: "https://dynamic-moxie-09a484.netlify.app/",
-        // debug: true, // uncomment this line to see Library errors and warnings in the console
-        fullscreen: true,
-        symbol: symbol,
-        interval: params.has("interval") ? params.get("interval").replace(/m$/, "") : "1",
-        container: "tv_chart_container",
-        datafeed,
-        locale: "en",
-        disabled_features: disabledFeatures,
-        enabled_features: [
-          "show_symbol_logos",
-          "custom_resolutions",
-          "seconds_resolution",
-          "chart_style_hilo_last_price"
-        ],
-        theme,
-      }));
 
-      // Subscribe to symbol changes and notify parent window
-      widget.onChartReady(() => {
-        widget.activeChart().onSymbolChanged().subscribe(null, () => {
-          const currentSymbol = widget.activeChart().symbol();
-          console.log(`Symbol changed to: ${currentSymbol}`);
-          window.parent?.postMessage({
-            type: 'symbolChange',
-            contractId: currentSymbol.toLowerCase()
-          }, '*');
+      function createWidget(symbol, interval) {
+        const widget = (window.tvWidget = new TradingView.widget({
+          library_path: "https://dynamic-moxie-09a484.netlify.app/",
+          // debug: true, // uncomment this line to see Library errors and warnings in the console
+          fullscreen: true,
+          symbol,
+          interval,
+          container: "tv_chart_container",
+          datafeed,
+          locale: "en",
+          disabled_features: disabledFeatures,
+          enabled_features: [
+            "show_symbol_logos",
+            "custom_resolutions",
+            "seconds_resolution",
+            "chart_style_hilo_last_price"
+          ],
+          theme,
+        }));
+
+        // Notify the parent window when the symbol changes
+        widget.onChartReady(() => {
+          widget.activeChart().onSymbolChanged().subscribe(null, () => {
+            const currentSymbol = widget.activeChart().symbol();
+            console.log(`Symbol changed to: ${currentSymbol}`);
+            window.parent?.postMessage({
+              type: 'symbolChange',
+              contractId: currentSymbol.toLowerCase()
+            }, '*');
+          });
         });
-      });
 
-      // Add toggle button after widget initialization
-      widget.headerReady().then(function () {
-        let button = widget.createButton();
-        button.style.cursor = 'pointer';
-
-        let isPrice = localStorage.getItem('chartMode') !== 'mcap';
-        const updateButtonState = () => {
+        // Price / MCap toggle
+        widget.headerReady().then(() => {
+          const button = widget.createButton();
+          button.style.cursor = 'pointer';
+          const isPrice = !isMCap();
           button.innerHTML = `
               <span style="${isPrice ? 'color: #2962FF; font-weight: bold' : ''}">Price</span>
               /
               <span style="${!isPrice ? 'color: #2962FF; font-weight: bold' : ''}">MCap</span>
             `;
-        };
-
-        updateButtonState();
-
-        button.addEventListener("click", function () {
-          isPrice = !isPrice;
-          localStorage.setItem('chartMode', isPrice ? 'price' : 'mcap');
-
-          // Save current widget state before cleanup
-          const currentSymbol = widget.activeChart().symbol();
-          const currentResolution = widget.activeChart().resolution();
-
-          // Close all existing WebSocket connections
-          Object.values(subscribers).forEach(sub => {
-            if (sub && sub.ws) {
-              sub.ws.close();
-            }
-          });
-
-          // Clear all caches
-          Object.keys(latestBars).forEach(key => delete latestBars[key]);
-          Object.keys(subscribers).forEach(key => delete subscribers[key]);
-
-          // Remove old widget
-          widget.remove();
-
-          // Create new widget
-          widget = window.tvWidget = new TradingView.widget({
-            library_path: "https://dynamic-moxie-09a484.netlify.app/",
-            fullscreen: true,
-            symbol: currentSymbol.toLowerCase(),
-            interval: currentResolution,
-            container: "tv_chart_container",
-            datafeed,
-            locale: "en",
-            disabled_features: disabledFeatures,
-            enabled_features: [
-              "show_symbol_logos",
-              "custom_resolutions",
-              "seconds_resolution",
-              "chart_style_hilo_last_price"
-            ],
-            theme,
-          });
-
-          // Resubscribe to symbol changes for the new widget
-          widget.onChartReady(() => {
-            widget.activeChart().onSymbolChanged().subscribe(null, () => {
-              const currentSymbol = widget.activeChart().symbol();
-              console.log(`Symbol changed to: ${currentSymbol}`);
-              window.parent?.postMessage({
-                type: 'symbolChange',
-                contractId: currentSymbol.toLowerCase()
-              }, '*');
-            });
-          });
-
-          // Reinitialize the button after new widget is ready
-          widget.headerReady().then(() => {
-            const newButton = widget.createButton();
-            newButton.style.cursor = 'pointer';
-            button = newButton;
-            updateButtonState();
-            // Reattach click handler
-            newButton.addEventListener("click", arguments.callee);
+          button.addEventListener("click", () => {
+            localStorage.setItem('chartMode', isPrice ? 'mcap' : 'price');
+            const currentSymbol = widget.activeChart().symbol().toLowerCase();
+            const currentResolution = widget.activeChart().resolution();
+            // Bars are cached in the other mode, so start over with a new widget
+            widget.remove();
+            createWidget(currentSymbol, currentResolution);
           });
         });
+      }
+
+      createWidget(symbol, interval);
+    }
+
+    async function fetchApi(path) {
+      const response = await fetch(`${apiUrl}${path}`);
+      const result = await response.json();
+      if (!response.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+      return result;
+    }
+
+    // Turns a table of the Intear API into an object per row
+    function rows({ columns, rows }) {
+      return rows.map((row) => Object.fromEntries(columns.map((column, i) => [column, row[i]])));
+    }
+
+    async function getToken(tokenId) {
+      const query = new URLSearchParams({
+        ids: tokenId,
+        fields: "name,symbol,icon_hash,price_usd,circulating_supply_with_decimals",
       });
+      return rows(await fetchApi(`/tokens?${query}`))[0];
     }
 
-    function normalizeTokenMetadata(tokenData, account_id) {
-      const metadata = tokenData?.metadata ?? tokenData ?? {};
-      return {
-        name: metadata.name ?? account_id,
-        symbol: metadata.symbol ?? account_id,
-        decimals: Number(metadata.decimals ?? 24),
-        icon: metadata.icon?.startsWith("data:") ? metadata.icon : null,
-        reference: metadata.reference ?? null,
-        reference_hash: metadata.reference_hash ?? null,
-      };
-    }
-
-    async function getMetadata(account_id, tokenDataFromSearch = null) {
-      console.log(`Getting ${account_id}`);
-      if (account_id === "wrap.near") {
+    // Name, symbol and icon of a token, with wrap.near shown as NEAR
+    function withNearMetadata(token) {
+      if (token.account_id === "wrap.near") {
         return {
           name: "NEAR",
           symbol: "NEAR",
-          decimals: 24,
           icon: 'data:image/svg+xml,<svg viewBox="0 0 1080 1080" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="1080" height="1080" fill="%2300EC97"/><path d="M773.425 243.38C751.453 243.38 731.054 254.772 719.544 273.499L595.538 457.606C591.499 463.673 593.138 471.854 599.206 475.893C604.124 479.172 610.631 478.766 615.11 474.913L737.172 369.042C739.2 367.217 742.327 367.403 744.152 369.431C744.98 370.361 745.42 371.561 745.42 372.794V704.265C745.42 707.003 743.206 709.2 740.468 709.2C738.997 709.2 737.611 708.558 736.682 707.425L367.707 265.758C355.69 251.577 338.045 243.397 319.47 243.38H306.575C271.673 243.38 243.38 271.673 243.38 306.575V773.425C243.38 808.327 271.673 836.62 306.575 836.62C328.546 836.62 348.946 825.228 360.456 806.501L484.462 622.394C488.501 616.327 486.862 608.146 480.794 604.107C475.876 600.828 469.369 601.234 464.89 605.087L342.828 710.958C340.8 712.783 337.673 712.597 335.848 710.569C335.02 709.639 334.58 708.439 334.597 707.206V375.651C334.597 372.913 336.811 370.715 339.549 370.715C341.003 370.715 342.406 371.358 343.335 372.49L712.259 814.242C724.276 828.423 741.921 836.603 760.496 836.62H773.392C808.293 836.637 836.603 808.361 836.637 773.459V306.575C836.637 271.673 808.344 243.38 773.442 243.38H773.425Z" fill="black"/></svg>',
-          spec: "ft-1.0.0",
-          reference: null,
-          reference_hash: null,
         };
       }
-
-      const tokenId = account_id.toLowerCase();
-      if (tokenDataFromSearch) {
-        return normalizeTokenMetadata(tokenDataFromSearch, tokenId);
-      }
-
-      const tokenData = await fetch(
-        `${pricesUrl}/token?token_id=${encodeURIComponent(tokenId)}`
-      ).then((data) => data.json());
-
-      return normalizeTokenMetadata(tokenData, tokenId);
+      return {
+        name: token.name ?? token.account_id,
+        symbol: token.symbol ?? token.account_id,
+        icon: token.icon_hash ? `${apiUrl}/icon/${token.icon_hash}.webp` : null,
+      };
     }
 
     window.addEventListener("DOMContentLoaded", initOnReady, false);
